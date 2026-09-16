@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "drawing2step"
+version = "0.1.0"
+description = "Local prerequisite toolkit and synthetic evaluation lab for Drawing-to-STEP"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "cadquery>=2.6,<2.7",
+    "certifi>=2026.7.22",
+    "fastapi>=0.115,<1",
+    "pydantic>=2.10,<3",
+    "pymupdf>=1.26,<2",
+    "python-dotenv>=1.1,<2",
+    "python-multipart>=0.0.20,<1",
+    "uvicorn>=0.34,<1",
+]
+
+[project.scripts]
+drawing2step = "drawing2step.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+ "pytest-cov>=6,<7",
+ "ruff>=0.11,<1",
+ "mypy>=1.15,<2",
+ "httpx>=0.28,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

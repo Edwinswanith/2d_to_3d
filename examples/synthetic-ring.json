@@ -1,0 +1,13 @@
+{
+  "schema_version": "body-evaluation-v1",
+  "synthetic": true,
+  "ledger": {
+    "OD": {"value": "120", "kind": "diameter", "unit": "mm"},
+    "ID": {"value": "80", "kind": "diameter", "unit": "mm"},
+    "L": {"value": "16", "kind": "linear", "unit": "mm"}
+  },
+  "stations": [
+    {"z": {"expr": "L-L"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
+    {"z": {"ledger": "L"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}}
+  ]
+}
