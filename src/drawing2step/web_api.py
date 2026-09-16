@@ -34,7 +34,6 @@ def _csv_env(name: str) -> list[str]:
 
 
 def create_app(root: Path = Path("work/web"), storage: WebStorage | None = None) -> FastAPI:
-    root.mkdir(parents=True, exist_ok=True)
     default_root = Path("work/web")
     store = storage or (
         default_web_storage(root) if root == default_root else LocalWebStorage(root)
