@@ -19,6 +19,9 @@ uv run uvicorn drawing2step.web_api:app --host 127.0.0.1 --port 8000
 
 Open http://127.0.0.1:8000. Upload one sheet, correct its orientation if necessary, and generate
 its body preview. Drag to orbit, scroll to zoom, toggle wireframe, reset, or expand the viewer.
+The generation overlay follows actual upload, preparation, reading, citation/unit checking,
+body construction and preview statuses. It displays elapsed session time without percentages
+or remaining-time estimates. Reduced-motion preferences stop its animations.
 Use STEP for CAD editing and STL for mesh workflows. Results persist under ignored `work/web/`;
 the result URL can reopen a saved drawing after refresh or a server restart.
 

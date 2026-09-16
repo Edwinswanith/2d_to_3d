@@ -134,25 +134,59 @@ def _measure(shape: Any) -> dict[str, Any]:
     }
 
 
+class ProfileError(ValueError):
+    """Deterministic profile inconsistency requiring a new association decision."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def evaluate_profile(spec: BodySpec) -> list[tuple[float, float, float]]:
+    ledger = {k: v.model_dump(mode="json") for k, v in spec.ledger.items()}
+    rows = [
+        (
+            float(evaluate_number(s.z.model_dump(), ledger)),
+            float(evaluate_number(s.od.model_dump(), ledger)),
+            float(evaluate_number(s.id.model_dump(), ledger)),
+        )
+        for s in spec.stations
+    ]
+    for i, (z, od, bore) in enumerate(rows):
+        if z < 0 or od <= bore or bore < 0:
+            raise ProfileError(
+                "PROFILE_NESTING",
+                f"Profile station {i + 1} has negative position or non-nested diameters. "
+                "Confirm its cited dimensions.",
+            )
+    for i, (before, after) in enumerate(zip(rows[:-1], rows[1:], strict=True)):
+        if after[0] < before[0]:
+            raise ProfileError(
+                "PROFILE_AXIAL_ORDER",
+                f"Profile station {i + 2} goes backward from {before[0]:.6g} mm "
+                f"to {after[0]:.6g} mm. Confirm whether the cited axial dimensions "
+                "are offsets or absolute positions.",
+            )
+        if after == before:
+            raise ProfileError(
+                "PROFILE_DUPLICATE",
+                f"Profile stations {i + 1} and {i + 2} are identical. "
+                "Confirm the proposed profile sequence.",
+            )
+    if rows[-1][0] <= rows[0][0]:
+        raise ProfileError(
+            "PROFILE_ZERO_LENGTH",
+            "The proposed profile has zero axial length. Confirm its thickness dimension.",
+        )
+    return rows
+
+
 def build_verified(spec: BodySpec, output: Path, reference: Path | None = None) -> dict[str, Any]:
     """Export/reimport a body; report independent dimensions with explicit UNKNOWNs."""
     if not spec.synthetic and (not spec.engineer or not spec.unit_decision_reason):
         raise ValueError("Real drawing geometry requires an engineer and explicit unit decision")
     ledger = {k: v.model_dump(mode="json") for k, v in spec.ledger.items()}
-    rows = [
-        tuple(
-            float(evaluate_number(getattr(s, key).model_dump(), ledger))
-            for key in ("z", "od", "id")
-        )
-        for s in spec.stations
-    ]
-    if any(z < 0 or od <= bore or bore < 0 for z, od, bore in rows):
-        raise ValueError("Profile diameters must nest and axial coordinates must be nonnegative")
-    if (
-        any(rows[i + 1][0] < row[0] or rows[i + 1] == row for i, row in enumerate(rows[:-1]))
-        or rows[-1][0] <= rows[0][0]
-    ):
-        raise ValueError("Stations must be ordered axially with a nonzero total length")
+    rows = evaluate_profile(spec)
     points = [(od / 2, z) for z, od, bore in rows] + [
         (bore / 2, z) for z, od, bore in reversed(rows)
     ]

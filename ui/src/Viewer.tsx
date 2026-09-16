@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Expand, RotateCcw, ScanLine } from 'lucide-react';
 
 export type MeshData = { positions: number[]; indices: number[]; units: string };
 
-export default function Viewer({ mesh, loading }: { mesh: MeshData | null; loading: boolean }) {
+export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overlay?: ReactNode }) {
   const host = useRef<HTMLDivElement>(null);
   const reset = useRef<() => void>(() => {});
   const [error, setError] = useState('');
@@ -77,7 +77,7 @@ export default function Viewer({ mesh, loading }: { mesh: MeshData | null; loadi
     <div className="viewport-header"><span><i className={mesh ? 'live-dot' : 'muted-dot'} />{mesh ? 'BODY PREVIEW' : '3D WORKSPACE'}</span><span className="mono">{mesh ? 'MODEL UNITS / MM' : 'ILLUSTRATION'}</span></div>
     <div ref={host} className="canvas-host" aria-label={mesh ? 'Interactive generated 3D body model' : 'Illustrative ring; upload a drawing to generate your model'} />
     {!mesh && <div className="viewport-copy"><span className="eyebrow">FROM SHEET TO SOLID</span><h2>Your drawing.<br />Another dimension.</h2><p>Upload a gland-ring drawing to see its body take shape here.</p></div>}
-    {loading && <div className="viewer-busy"><span className="spinner" />Preparing your model</div>}
+    {overlay}
     {error && <div className="viewer-error" role="alert">{error}</div>}
     <div className="viewport-bottom"><span className="mono">DRAG TO ORBIT · SCROLL TO ZOOM</span><div className="viewer-tools">
       <button type="button" onClick={() => setWireframe(!wireframe)} aria-label="Toggle wireframe" aria-pressed={wireframe} title="Wireframe"><ScanLine size={16} /></button>

@@ -13,7 +13,7 @@ import pymupdf
 from PIL import Image, ImageOps
 from pydantic import Field
 
-from drawing2step.body_cad import BodySpec, Station, build_verified
+from drawing2step.body_cad import BodySpec, ProfileError, Station, build_verified, evaluate_profile
 from drawing2step.models import Contract
 from drawing2step.pdf_diagnostic import call_gemini, load_api_key, response_text
 from drawing2step.storage import canonical_json, write_once
@@ -236,10 +236,10 @@ def process_drawing(
     directory: Path, filename: str, rotation: int, override: LengthUnit | None, update: Any
 ) -> None:
     data = (directory / "original").read_bytes()
-    update({"status": "rendering", "message": "Preparing your drawing"})
+    update({"status": "rendering", "message": "Preparing the sheet"})
     image = render_input(data, filename, rotation)
     write_once(directory / "drawing.png", image)
-    update({"status": "reading", "message": "Reading dimensions and unit statements"})
+    update({"status": "reading", "message": "Reading the dimensions"})
     key = load_api_key()
     response = call_gemini(
         image, key, "gemini-3.5-flash", prompt=WEB_PROMPT, schema=reader_schema()
@@ -250,27 +250,50 @@ def process_drawing(
     write_once(directory / "draft.json", canonical_json(draft.model_dump(mode="json")))
     write_once(directory / "prompt.txt", WEB_PROMPT.encode())
     write_once(directory / "reader-schema.json", canonical_json(reader_schema()))
+    update({"status": "checking", "message": "Checking the numbers"})
     spec, info = prepare_spec(draft, override)
+    if spec is not None:
+        try:
+            evaluate_profile(spec)
+        except (ProfileError, ValueError) as error:
+            info["review_code"] = (
+                error.code if isinstance(error, ProfileError) else "PROFILE_CITATION"
+            )
+            message = (
+                str(error)
+                if isinstance(error, ProfileError)
+                else "A profile input has an unavailable citation or invalid expression. "
+                "Confirm dimensions and associations before building."
+            )
+            info["review_message"] = message
+            info["warnings"].append(message)
+            info["proposed_stations"] = [s.model_dump() for s in spec.stations]
+            info["profile_validation"] = "FAIL"
+            spec = None
+        else:
+            info["profile_validation"] = "PASS"
     update(
         {
             **info,
-            "status": "building",
-            "message": "Constructing the body and checking STEP integrity",
+            "status": "checking",
+            "message": "Checking the numbers",
         }
     )
     if spec is None:
         update(
             {
                 "status": "review",
-                "message": "This drawing needs a manual profile review",
+                "message": info.get("review_message", "This drawing needs a manual profile review"),
                 "model_available": False,
                 "download_available": False,
             }
         )
         return
+    update({"status": "building", "message": "Shaping the ring"})
     report = build_verified(spec, directory / "cad")
     if report["V2"] != "PASS":
         raise ValueError("STEP integrity check failed; download has been disabled")
+    update({"status": "previewing", "message": "Preparing your 3D view"})
     shape = cq.importers.importStep(str(directory / "cad/evaluation-body.step")).val()
     if not isinstance(shape, cq.Shape):
         raise ValueError("STEP could not be loaded for preview")

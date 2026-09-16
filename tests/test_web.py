@@ -236,3 +236,108 @@ def test_model_zero_origin_uses_cited_datum_and_length_alias():
     assert spec.stations[0].z.expr == "OD-OD"
     assert spec.ledger["L"].kind == "linear"
     assert info["requirements"][2]["resolved_unit"] == "mm"
+
+
+@pytest.mark.parametrize("has_profile", [True, False])
+def test_progress_stages_describe_only_work_that_runs(tmp_path, monkeypatch, has_profile):
+    from drawing2step.web_pipeline import process_drawing
+
+    monkeypatch.setenv("GEMINI_API_KEY", "private-fixture-key")
+    raw = draft().model_dump()
+    if not has_profile:
+        raw["stations"] = []
+    proposal = DrawingDraft.model_validate(raw)
+    monkeypatch.setattr(
+        "drawing2step.web_pipeline.call_gemini",
+        lambda *a, **k: {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": proposal.model_dump_json()}]},
+                }
+            ]
+        },
+    )
+    (tmp_path / "original").write_bytes(png())
+    stages = []
+    process_drawing(
+        tmp_path, "synthetic.png", 0, None, lambda state: stages.append(state["status"])
+    )
+    if has_profile:
+        assert stages == [
+            "rendering",
+            "reading",
+            "checking",
+            "checking",
+            "building",
+            "previewing",
+            "ready",
+        ]
+    else:
+        assert stages == ["rendering", "reading", "checking", "checking", "review"]
+        assert not (tmp_path / "cad").exists()
+
+
+def test_backward_inch_profile_goes_to_review_before_build(tmp_path, monkeypatch):
+    from drawing2step.body_cad import ProfileError, evaluate_profile
+    from drawing2step.web_pipeline import process_drawing
+
+    raw = draft("DIMENSIONS IN INCHES").model_dump()
+    raw["callouts"].extend(
+        [
+            {
+                "id": "A",
+                "raw_text": ".125",
+                "value_printed": ".125",
+                "kind": "linear",
+                "unit_printed": "",
+            },
+            {
+                "id": "B",
+                "raw_text": ".12",
+                "value_printed": ".12",
+                "kind": "linear",
+                "unit_printed": "",
+            },
+        ]
+    )
+    raw["stations"] = [
+        raw["stations"][0],
+        {"z": {"ledger": "A"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
+        {"z": {"ledger": "B"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
+        raw["stations"][-1],
+    ]
+    proposal = DrawingDraft.model_validate(raw)
+    spec, _ = prepare_spec(proposal, None)
+    with pytest.raises(ProfileError) as failure:
+        evaluate_profile(spec)
+    assert failure.value.code == "PROFILE_AXIAL_ORDER"
+    monkeypatch.setenv("GEMINI_API_KEY", "private-fixture-key")
+    monkeypatch.setattr(
+        "drawing2step.web_pipeline.call_gemini",
+        lambda *a, **k: {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": proposal.model_dump_json()}]},
+                }
+            ]
+        },
+    )
+
+    def forbidden_build(*args, **kwargs):
+        pytest.fail("A contradictory profile must not reach CAD construction")
+
+    monkeypatch.setattr("drawing2step.web_pipeline.build_verified", forbidden_build)
+    (tmp_path / "original").write_bytes(png())
+    updates = []
+    process_drawing(tmp_path, "synthetic.png", 0, None, updates.append)
+    assert updates[-1]["status"] == "review"
+    info = next(state for state in updates if "review_code" in state)
+    assert info["review_code"] == "PROFILE_AXIAL_ORDER"
+    assert info["profile_validation"] == "FAIL"
+    assert "3.175 mm" in updates[-1]["message"] and "3.048 mm" in updates[-1]["message"]
+    assert updates[-1]["download_available"] is False
+    assert "building" not in [state["status"] for state in updates]
+    assert len(info["requirements"]) == len(proposal.callouts)
+    assert not (tmp_path / "cad").exists()
