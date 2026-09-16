@@ -1,5 +1,6 @@
 import io
 import time
+from decimal import Decimal
 
 import pymupdf
 import pytest
@@ -155,7 +156,7 @@ def test_multi_page_pdf_and_rotation_are_handled_explicitly():
     assert image.width > image.height
 
 
-@pytest.mark.parametrize("printed,accepted", [(".500", True), ("500", False)])
+@pytest.mark.parametrize("printed,accepted", [(".500", True), ("0.500", True), ("500", False)])
 def test_leading_decimal_is_a_complete_source_token(printed, accepted):
     raw = draft().model_dump()
     raw["callouts"][0].update(raw_text=".500", value_printed=printed)
@@ -238,6 +239,48 @@ def test_model_zero_origin_uses_cited_datum_and_length_alias():
     assert info["requirements"][2]["resolved_unit"] == "mm"
 
 
+def test_leading_decimal_profile_citations_remain_buildable():
+    raw = draft("DIMENSIONS IN INCHES").model_dump()
+    raw["callouts"] = [
+        {
+            "id": "OD",
+            "raw_text": "3.375",
+            "value_printed": "3.375",
+            "kind": "diameter",
+            "unit_printed": "",
+        },
+        {
+            "id": "ID",
+            "raw_text": "2.875",
+            "value_printed": "2.875",
+            "kind": "diameter",
+            "unit_printed": "",
+        },
+        {
+            "id": "START",
+            "raw_text": ".125",
+            "value_printed": "0.125",
+            "kind": "linear",
+            "unit_printed": "",
+        },
+        {
+            "id": "END",
+            "raw_text": ".793",
+            "value_printed": "0.793",
+            "kind": "linear",
+            "unit_printed": "",
+        },
+    ]
+    raw["stations"] = [
+        {"z": {"expr": "START-START"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
+        {"z": {"ledger": "END"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
+    ]
+    spec, info = prepare_spec(DrawingDraft.model_validate(raw), None)
+    assert spec is not None
+    assert "numeric value is not an exact printed source number" not in "\n".join(info["warnings"])
+    assert spec.ledger["START"].value == Decimal("0.125")
+
+
 @pytest.mark.parametrize("has_profile", [True, False])
 def test_progress_stages_describe_only_work_that_runs(tmp_path, monkeypatch, has_profile):
     from drawing2step.web_pipeline import process_drawing
@@ -276,6 +319,7 @@ def test_progress_stages_describe_only_work_that_runs(tmp_path, monkeypatch, has
     else:
         assert stages == ["rendering", "reading", "checking", "checking", "review"]
         assert not (tmp_path / "cad").exists()
+        assert (tmp_path / "manifest.json").is_file()
 
 
 def test_backward_inch_profile_goes_to_review_before_build(tmp_path, monkeypatch):

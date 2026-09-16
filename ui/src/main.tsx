@@ -50,16 +50,22 @@ function App() {
         if (!response.ok) throw new Error('Could not read this drawing’s progress. Refresh and try again.');
         const next = await response.json() as Job;
         if (version !== generation.current || stopped) return;
+        let waitingForMesh = false;
         if (next.status === 'ready' && next.model_available) {
           const meshResponse = await fetch(`/api/drawings/${id}/files/mesh`, { signal: controller.signal });
-          if (!meshResponse.ok) throw new Error('The model preview could not be loaded.');
-          const geometry = await meshResponse.json() as MeshData;
-          if (version !== generation.current || stopped) return;
-          setMesh(geometry);
+          if (meshResponse.ok) {
+            const geometry = await meshResponse.json() as MeshData;
+            if (version !== generation.current || stopped) return;
+            setMesh(geometry);
+          } else if ([404, 409, 425].includes(meshResponse.status)) {
+            waitingForMesh = true;
+          } else {
+            throw new Error('The model preview could not be loaded.');
+          }
         }
         setJob(next);
         if (next.status === 'failed') setError(next.message);
-        if (!terminal.has(next.status)) timer = setTimeout(poll, 1200);
+        if (!terminal.has(next.status) || waitingForMesh) timer = setTimeout(poll, 1200);
       } catch (e) {
         if (!stopped && (e as Error).name !== 'AbortError') {
           setError((e as Error).message); setJob(prev => prev ? { ...prev, status: 'failed' } : prev);
@@ -84,7 +90,9 @@ function App() {
     finally { setPosting(false); }
   }
 
-  const phases = [{ key: 'Upload', done: !!job }, { key: 'Read drawing', done: !!job && ['checking', 'building', 'previewing', 'ready', 'review'].includes(job.status) }, { key: 'Build & inspect', done: job?.status === 'ready' }, { key: 'Download', done: false }];
+  const canDownloadCad = !!job?.download_available;
+  const canDownloadReport = !!job && ['ready', 'review'].includes(job.status);
+  const phases = [{ key: 'Upload', done: !!job }, { key: 'Read drawing', done: !!job && ['checking', 'building', 'previewing', 'ready', 'review'].includes(job.status) }, { key: 'Build & inspect', done: job?.status === 'ready' }, { key: 'Download', done: canDownloadCad || canDownloadReport }];
   return <div className="app-shell">
     <aside className="rail"><a className="logo-icon" href="/" aria-label="Formwerk home"><Layers3 size={23} /></a><div className="rail-line" /><button className="rail-active" aria-label="Drawing workspace" title="Drawing workspace"><Box size={21} /></button><span className="rail-caption">FW</span></aside>
     <div className="workspace">
@@ -115,7 +123,7 @@ function App() {
             <Viewer mesh={mesh} overlay={busy ? <GenerationProgress status={progressStatus} startedAt={startedAt.current} drawingUrl={job ? `/api/drawings/${job.id}/files/drawing` : undefined} /> : null} />
             <div className="model-caption"><div><span className="eyebrow">{mesh ? 'YOUR MODEL' : 'THE NEXT DIMENSION'}</span><h2>{mesh ? job?.part_name || 'Gland ring body' : 'A better perspective starts here.'}</h2><p>{mesh ? `${job?.drawing_number || file?.name} · Source units ${job?.unit?.toUpperCase()} · ${job?.unit_source}` : 'Orbit the solid, inspect its form, and export a STEP file for future CAD work.'}</p></div><div className="caption-icon"><Box size={24} /></div></div>
             {mesh && <div className="result-strip"><span><Check size={15} />STEP integrity passed</span><span className="mono">{job?.measurements?.bbox.map(x => x.toFixed(2)).join(' × ')} MM</span></div>}
-            <div className="download-bar"><div><ArrowDownToLine size={19} /><div><strong>{mesh ? 'Keep your body draft' : 'Your design, ready to keep'}</strong><p>{mesh ? 'Partial body preview · drawing conformance unverified' : 'STEP for CAD · STL for mesh workflows'}</p></div></div><div className="download-actions">{job?.download_available ? <><a className="download-step" href={`/api/drawings/${job.id}/files/step`} download>STEP <ArrowDownToLine size={15} /></a><a className="download-secondary" href={`/api/drawings/${job.id}/files/stl`} download>STL</a></> : <><button className="download-step" disabled>STEP <ArrowDownToLine size={15} /></button><button className="download-secondary" disabled>STL</button></>}</div></div>
+            <div className="download-bar"><div><ArrowDownToLine size={19} /><div><strong>{canDownloadCad ? 'Keep your body draft' : canDownloadReport ? 'Review package ready' : 'Your design, ready to keep'}</strong><p>{canDownloadCad ? 'Partial body preview · drawing conformance unverified' : canDownloadReport ? 'CAD export is blocked until the profile is reviewed.' : 'STEP for CAD · STL for mesh workflows'}</p></div></div><div className="download-actions">{canDownloadCad ? <><a className="download-step" href={`/api/drawings/${job.id}/files/step`} download>STEP <ArrowDownToLine size={15} /></a><a className="download-secondary" href={`/api/drawings/${job.id}/files/stl`} download>STL</a><a className="download-secondary" href={`/api/drawings/${job.id}/files/report`} download>Report</a></> : canDownloadReport ? <><a className="download-step" href={`/api/drawings/${job.id}/files/report`} download>Report <ArrowDownToLine size={15} /></a><button className="download-secondary" disabled>STEP</button><button className="download-secondary" disabled>STL</button></> : <><button className="download-step" disabled>STEP <ArrowDownToLine size={15} /></button><button className="download-secondary" disabled>STL</button></>}</div></div>
             {job && terminal.has(job.status) && <div className="review-card"><button onClick={() => setDetails(!details)} aria-expanded={details}><span><FileText size={17} />{job.status === 'review' ? 'Profile needs review' : 'Drawing notes & feature coverage'}</span><Plus size={17} className={details ? 'rotate-plus' : ''} /></button><p>{mesh ? "Only the axial body is built. Holes, slots, pins and ports need further modeling and review." : job.status === "review" ? job.message : "No model was generated. Review the reading notes and profile before creating geometry."}</p>{details && <div className="review-details">{job.unsupported_features?.length ? <><strong>Features outside this preview</strong><ul>{job.unsupported_features.map((text, i) => <li key={i}>{text}</li>)}</ul></> : null}{job.warnings?.length ? <><strong>Reading notes</strong><ul>{job.warnings.map((text, i) => <li key={i}>{text}</li>)}</ul></> : null}<strong>Proposed callouts · {job.requirements?.length || 0}</strong><div className="ledger-table">{job.requirements?.map(r => <div key={r.id}><span className="mono">{r.id}</span><span>{r.raw_text}</span><small>{r.resolved_unit}</small></div>)}</div></div>}</div>}
           </section>
         </div>

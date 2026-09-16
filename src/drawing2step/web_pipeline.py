@@ -60,6 +60,18 @@ class DrawingDraft(Contract):
     uncertainties: list[str]
 
 
+def source_number_matches(value_printed: str, printed_numbers: list[str]) -> bool:
+    if value_printed in printed_numbers:
+        return True
+    if value_printed.startswith("0."):
+        return value_printed[1:] in printed_numbers
+    if value_printed.startswith("-0."):
+        return "-" + value_printed[2:] in printed_numbers
+    if value_printed.startswith("+0."):
+        return "+" + value_printed[2:] in printed_numbers
+    return False
+
+
 def reader_schema() -> dict[str, Any]:
     """Expand this nonrecursive contract for provider grammar compatibility.
 
@@ -193,7 +205,7 @@ def prepare_spec(
             continue
         # Geometry receives only transcribed source numbers, not model-computed values.
         printed_numbers = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", c.raw_text)
-        if c.value_printed not in printed_numbers or not numeric.is_finite():
+        if not source_number_matches(c.value_printed, printed_numbers) or not numeric.is_finite():
             warnings.append(f"{c.id}: numeric value is not an exact printed source number")
             continue
         ledger[c.id] = {"value": c.value_printed, "kind": kind, "unit": local_unit}
@@ -280,6 +292,31 @@ def process_drawing(
         }
     )
     if spec is None:
+        write_once(
+            directory / "manifest.json",
+            canonical_json(
+                {
+                    "original_sha256": hashlib.sha256(data).hexdigest(),
+                    "rotation": rotation,
+                    "unit_policy": info["unit_source"],
+                    "input_unit": info["unit"],
+                    "cad_unit": "mm",
+                    "model": "gemini-3.5-flash",
+                    "model_version": response.get("modelVersion"),
+                    "prompt_version": "web-draft-p001",
+                    "schema_version": "body-review-v1",
+                    "artifact_kind": "MANUAL_PROFILE_REVIEW",
+                    "release": "BLOCKED",
+                    "message": info.get(
+                        "review_message", "This drawing needs a manual profile review"
+                    ),
+                    "requirements": info["requirements"],
+                    "warnings": info["warnings"],
+                    "unsupported_features": info["unsupported_features"],
+                    "proposed_stations": info.get("proposed_stations", []),
+                }
+            ),
+        )
         update(
             {
                 "status": "review",

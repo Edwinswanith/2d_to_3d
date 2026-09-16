@@ -9,6 +9,8 @@ reading acceptance, engineer review and production release remain future gated m
 ## Web app
 
 Requires Python 3.12, uv, Node.js 20+, and `GEMINI_API_KEY` in the ignored `.env` or environment.
+By default, job files persist under ignored `work/web/`. For deployment, set the Cloudflare R2
+variables below and the web app stores every job artifact under `drawings/{job_id}/...`.
 
 ```sh
 uv sync --locked
@@ -17,13 +19,23 @@ npm run build --prefix ui
 uv run uvicorn drawing2step.web_api:app --host 127.0.0.1 --port 8000
 ```
 
+```sh
+CLOUDFLARE_R2_BUCKET=drawing2step
+CLOUDFLARE_R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+CLOUDFLARE_R2_ACCESS_KEY_ID=...
+CLOUDFLARE_R2_SECRET_ACCESS_KEY=...
+# optional, defaults to drawings
+CLOUDFLARE_R2_PREFIX=drawings
+```
+
 Open http://127.0.0.1:8000. Upload one sheet, correct its orientation if necessary, and generate
 its body preview. Drag to orbit, scroll to zoom, toggle wireframe, reset, or expand the viewer.
 The generation overlay follows actual upload, preparation, reading, citation/unit checking,
 body construction and preview statuses. It displays elapsed session time without percentages
 or remaining-time estimates. Reduced-motion preferences stop its animations.
-Use STEP for CAD editing and STL for mesh workflows. Results persist under ignored `work/web/`;
-the result URL can reopen a saved drawing after refresh or a server restart.
+Use STEP for CAD editing and STL for mesh workflows. Results persist under ignored `work/web/`
+locally or the configured R2 prefix in deployment; the result URL can reopen a saved drawing after
+refresh or a server restart.
 
 Units default to mm. Explicit drawing cm/inch statements override the default, and explicit
 callout units override the drawing default. The optional unit selector corrects misleading
@@ -40,6 +52,28 @@ STEP round-trip integrity; dimensional association/completeness are still unveri
 For frontend development, run `npm run dev --prefix ui` with the API on port 8000. Vite serves
 port 5173 and proxies `/api`. API routes: POST `/api/drawings`, GET `/api/drawings/{id}`,
 and GET `/api/drawings/{id}/files/{drawing|mesh|step|stl|report}`.
+
+## Vercel deployment
+
+The repository includes `api/index.py`, `vercel.json`, and `.python-version` for Vercel. Vercel
+builds the React UI with `npm ci --prefix ui && npm run build --prefix ui`, then routes requests
+to the FastAPI app. Configure these environment variables in Vercel Project Settings:
+
+```sh
+GEMINI_API_KEY=...
+CLOUDFLARE_R2_BUCKET=2d-to-3d
+CLOUDFLARE_R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+CLOUDFLARE_R2_ACCESS_KEY_ID=...
+CLOUDFLARE_R2_SECRET_ACCESS_KEY=...
+CLOUDFLARE_R2_PREFIX=drawings
+# optional for custom domains, comma-separated
+DRAWING2STEP_ALLOWED_HOSTS=example.com,www.example.com
+DRAWING2STEP_ALLOWED_ORIGINS=https://example.com,https://www.example.com
+```
+
+Keep the R2 bucket private. The app streams downloads through authenticated application routes.
+Long CAD/model reads depend on Vercel Function limits; use the local server or a container host
+if production jobs exceed those limits.
 
 ## Run
 
