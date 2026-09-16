@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -35,8 +35,12 @@ def _csv_env(name: str) -> list[str]:
 
 def create_app(root: Path = Path("work/web"), storage: WebStorage | None = None) -> FastAPI:
     default_root = Path("work/web")
+    if root == default_root and os.getenv("VERCEL"):
+        root = Path("/tmp/drawing2step-web")
     store = storage or (
-        default_web_storage(root) if root == default_root else LocalWebStorage(root)
+        default_web_storage(root)
+        if root == default_root or os.getenv("VERCEL")
+        else LocalWebStorage(root)
     )
     lock = threading.Lock()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cad-draft")
@@ -227,8 +231,14 @@ def create_app(root: Path = Path("work/web"), storage: WebStorage | None = None)
             headers=headers,
         )
 
-    frontend = Path(__file__).resolve().parents[2] / "ui/dist"
-    if frontend.is_dir():
+    candidates = [Path.cwd() / "ui/dist", Path(__file__).resolve().parents[2] / "ui/dist"]
+    frontend = next((path for path in candidates if (path / "index.html").is_file()), None)
+    if os.getenv("VERCEL"):
+
+        @app.get("/", include_in_schema=False)
+        def frontend_index() -> RedirectResponse:
+            return RedirectResponse("/index.html")
+    elif frontend is not None:
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     return app
 

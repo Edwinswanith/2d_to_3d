@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Expand, RotateCcw, ScanLine } from 'lucide-react';
+import { Expand, RotateCcw, Grid2X2 } from 'lucide-react';
 
 export type MeshData = { positions: number[]; indices: number[]; units: string };
 
@@ -10,6 +10,7 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
   const reset = useRef<() => void>(() => {});
   const [error, setError] = useState('');
   const [wireframe, setWireframe] = useState(false);
+  useEffect(() => { setWireframe(false); }, [mesh]);
   useEffect(() => {
     const element = host.current;
     if (!element) return;
@@ -33,8 +34,15 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
       geometry.computeVertexNormals();
       geometry.computeBoundingBox();
       geometry.center();
-      material = new THREE.MeshStandardMaterial({ color: '#b5c0b8', metalness: 0.58, roughness: 0.34, wireframe });
+      material = new THREE.MeshStandardMaterial({ color: '#b5c0b8', metalness: 0.58, roughness: 0.34, side: THREE.DoubleSide, polygonOffset: wireframe, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
       shape = new THREE.Mesh(geometry, material);
+      if (wireframe) {
+        const edges = new THREE.LineSegments(
+          new THREE.WireframeGeometry(geometry),
+          new THREE.LineBasicMaterial({ color: '#50635d', transparent: true, opacity: 0.35 }),
+        );
+        shape.add(edges);
+      }
       shape.rotation.x = -Math.PI / 2;
     } else {
       material = new THREE.MeshStandardMaterial({ color: '#82998e', metalness: 0.3, roughness: 0.5, wireframe: true, transparent: true, opacity: 0.32 });
@@ -68,6 +76,11 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
     animate();
     return () => {
       cancelAnimationFrame(frame); observer.disconnect(); controls.dispose();
+      shape.children.forEach(child => {
+        if (child instanceof THREE.LineSegments) {
+          child.geometry.dispose(); (child.material as THREE.Material).dispose();
+        }
+      });
       geometry.dispose(); shape.geometry.dispose(); material.dispose(); grid.geometry.dispose();
       (grid.material as THREE.Material).dispose(); renderer.dispose(); renderer.domElement.remove();
     };
@@ -80,7 +93,7 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
     {overlay}
     {error && <div className="viewer-error" role="alert">{error}</div>}
     <div className="viewport-bottom"><span className="mono">DRAG TO ORBIT · SCROLL TO ZOOM</span><div className="viewer-tools">
-      <button type="button" onClick={() => setWireframe(!wireframe)} aria-label="Toggle wireframe" aria-pressed={wireframe} title="Wireframe"><ScanLine size={16} /></button>
+      <button type="button" disabled={!mesh} onClick={() => setWireframe(!wireframe)} aria-label="Toggle mesh edges" aria-pressed={wireframe} title={wireframe ? 'Hide mesh edges' : 'Show mesh edges'}><Grid2X2 size={16} /></button>
       <button type="button" onClick={() => reset.current()} aria-label="Reset model view" title="Reset view"><RotateCcw size={16} /></button>
       <button type="button" onClick={() => host.current?.parentElement?.requestFullscreen().catch(() => {})} aria-label="Expand viewer" title="Expand"><Expand size={16} /></button>
     </div></div>

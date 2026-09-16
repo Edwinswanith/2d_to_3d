@@ -1,9 +1,5 @@
 {
-  "buildCommand": "npm ci --prefix ui && npm run build --prefix ui",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "buildCommand": "npm ci --prefix ui && npm run build --prefix ui && python scripts/build_frontend.py"
 }

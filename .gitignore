@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 dist/
+public/
 work/
 .env
 .DS_Store

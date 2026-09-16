@@ -9,6 +9,30 @@ from PIL import Image
 
 from drawing2step.web_api import create_app
 from drawing2step.web_pipeline import DrawingDraft, detect_unit, prepare_spec, render_input
+from drawing2step.web_storage import LocalWebStorage
+
+
+def test_vercel_home_redirect_preserves_api_routes(tmp_path, monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    with TestClient(create_app(tmp_path, storage=LocalWebStorage(tmp_path))) as client:
+        response = client.get("/", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "/index.html"
+        response = client.get("/api/drawings/" + "a" * 32)
+        assert response.status_code == 404
+        assert response.json()["detail"] != "Not Found"
+
+
+def test_frontend_resolved_from_project_root(tmp_path, monkeypatch):
+    frontend = tmp_path / "ui" / "dist"
+    frontend.mkdir(parents=True)
+    (frontend / "index.html").write_text("<html>Workspace</html>")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VERCEL", raising=False)
+    with TestClient(create_app(tmp_path / "jobs")) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "Workspace" in response.text
 
 
 def draft(statement=""):
