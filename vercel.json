@@ -1,5 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "fastapi",
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "api/frontend/**"
+    }
+  },
   "buildCommand": "npm ci --prefix ui && npm run build --prefix ui && python scripts/build_frontend.py"
 }

@@ -57,7 +57,9 @@ and GET `/api/drawings/{id}/files/{drawing|mesh|step|stl|report}`.
 
 The repository includes `api/index.py`, `vercel.json`, and `.python-version` for Vercel. Vercel
 builds the React UI and copies it to `public/` using `scripts/build_frontend.py`. Static files
-are served by Vercel; API URLs retain their paths through the native FastAPI entrypoint.
+are served by Vercel; a second copy in `api/frontend/` is explicitly included in the function
+and served by FastAPI when a request reaches the backend. API URLs retain their paths through
+the native FastAPI entrypoint.
 Use the repository root as the Vercel Root Directory and the FastAPI framework preset.
 Remove any dashboard rewrite or Output Directory override from earlier deployments.
 Configure these environment variables in Vercel Project Settings:

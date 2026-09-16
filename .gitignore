@@ -7,6 +7,7 @@ __pycache__/
 htmlcov/
 dist/
 public/
+api/frontend/
 work/
 .env
 .DS_Store

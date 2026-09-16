@@ -12,12 +12,21 @@ from drawing2step.web_pipeline import DrawingDraft, detect_unit, prepare_spec, r
 from drawing2step.web_storage import LocalWebStorage
 
 
-def test_vercel_home_redirect_preserves_api_routes(tmp_path, monkeypatch):
+def test_vercel_bundled_frontend_preserves_api_routes(tmp_path, monkeypatch):
     monkeypatch.setenv("VERCEL", "1")
-    with TestClient(create_app(tmp_path, storage=LocalWebStorage(tmp_path))) as client:
-        response = client.get("/", follow_redirects=False)
-        assert response.status_code == 307
-        assert response.headers["location"] == "/index.html"
+    frontend = tmp_path / "api" / "frontend"
+    (frontend / "assets").mkdir(parents=True)
+    (frontend / "index.html").write_text('<html><script src="/assets/app.js"></script></html>')
+    (frontend / "assets" / "app.js").write_text("console.log('workspace')")
+    monkeypatch.chdir(tmp_path)
+    with TestClient(
+        create_app(tmp_path / "jobs", storage=LocalWebStorage(tmp_path / "jobs"), frontend=frontend)
+    ) as client:
+        for path in ("/", "/index.html", "/?drawing=" + "a" * 32):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/html")
+        assert client.get("/assets/app.js").text == "console.log('workspace')"
         response = client.get("/api/drawings/" + "a" * 32)
         assert response.status_code == 404
         assert response.json()["detail"] != "Not Found"
