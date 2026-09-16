@@ -8,7 +8,6 @@ from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any, Literal, Self
 
-import cadquery as cq
 from pydantic import Field, model_validator
 
 from drawing2step.models import Contract, Number
@@ -183,6 +182,8 @@ def evaluate_profile(spec: BodySpec) -> list[tuple[float, float, float]]:
 
 def build_verified(spec: BodySpec, output: Path, reference: Path | None = None) -> dict[str, Any]:
     """Export/reimport a body; report independent dimensions with explicit UNKNOWNs."""
+    import cadquery as cq
+
     if not spec.synthetic and (not spec.engineer or not spec.unit_decision_reason):
         raise ValueError("Real drawing geometry requires an engineer and explicit unit decision")
     ledger = {k: v.model_dump(mode="json") for k, v in spec.ledger.items()}

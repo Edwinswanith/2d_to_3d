@@ -1,0 +1,14 @@
+.venv/
+.venv-prod/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+work/
+tests/
+docs/
+examples/
+ui/node_modules/
+*.tsbuildinfo

@@ -8,15 +8,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
-import cadquery as cq
 import pymupdf
 from PIL import Image, ImageOps
 from pydantic import Field
 
-from drawing2step.body_cad import BodySpec, ProfileError, Station, build_verified, evaluate_profile
+from drawing2step.body_cad import BodySpec, ProfileError, Station, evaluate_profile
 from drawing2step.models import Contract
 from drawing2step.pdf_diagnostic import call_gemini, load_api_key, response_text
 from drawing2step.storage import canonical_json, write_once
+from drawing2step.web_cad import build_web_draft
 
 LengthUnit = Literal["mm", "cm", "in"]
 MAX_FILE = 20 * 1024 * 1024
@@ -327,21 +327,11 @@ def process_drawing(
         )
         return
     update({"status": "building", "message": "Shaping the ring"})
-    report = build_verified(spec, directory / "cad")
+    report, mesh = build_web_draft(spec, directory / "cad")
     if report["V2"] != "PASS":
         raise ValueError("STEP integrity check failed; download has been disabled")
     update({"status": "previewing", "message": "Preparing your 3D view"})
-    shape = cq.importers.importStep(str(directory / "cad/evaluation-body.step")).val()
-    if not isinstance(shape, cq.Shape):
-        raise ValueError("STEP could not be loaded for preview")
-    vertices, triangles = shape.tessellate(0.15)
-    mesh = {
-        "positions": [coord for v in vertices for coord in v.toTuple()],
-        "indices": [i for tri in triangles for i in tri],
-        "units": "mm",
-    }
     write_once(directory / "mesh.json", canonical_json(mesh))
-    cq.exporters.export(shape, str(directory / "model.stl"), tolerance=0.15)
     write_once(
         directory / "manifest.json",
         canonical_json(

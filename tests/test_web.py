@@ -372,7 +372,7 @@ def test_backward_inch_profile_goes_to_review_before_build(tmp_path, monkeypatch
     def forbidden_build(*args, **kwargs):
         pytest.fail("A contradictory profile must not reach CAD construction")
 
-    monkeypatch.setattr("drawing2step.web_pipeline.build_verified", forbidden_build)
+    monkeypatch.setattr("drawing2step.web_pipeline.build_web_draft", forbidden_build)
     (tmp_path / "original").write_bytes(png())
     updates = []
     process_drawing(tmp_path, "synthetic.png", 0, None, updates.append)

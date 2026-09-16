@@ -72,8 +72,9 @@ DRAWING2STEP_ALLOWED_ORIGINS=https://example.com,https://www.example.com
 ```
 
 Keep the R2 bucket private. The app streams downloads through authenticated application routes.
-Long CAD/model reads depend on Vercel Function limits; use the local server or a container host
-if production jobs exceed those limits.
+The Vercel web path uses a lightweight axisymmetric faceted exporter for mesh, STL, and STEP
+draft downloads so the Python function stays under Vercel's bundle limit. The heavier CadQuery
+round-trip verifier remains available for local CLI/dev validation.
 
 ## Run
 
@@ -86,6 +87,9 @@ uv run drawing2step init work/prerequisites.json
 uv run drawing2step readiness work/prerequisites.json
 uv run drawing2step demo --output work/lab
 ```
+
+CadQuery-backed CLI body verification is installed with the dev toolchain. In a minimal production
+install, use the web workflow or install dev dependencies before running `build-body`.
 
 The empty readiness manifest deliberately exits **2** and lists the missing prerequisites.
 The demo prints a run directory containing `report.html`, `cases.json`, `evaluation.json`,

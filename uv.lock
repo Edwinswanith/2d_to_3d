@@ -269,9 +269,9 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
-    { name = "cadquery" },
     { name = "certifi" },
     { name = "fastapi" },
+    { name = "pillow" },
     { name = "pydantic" },
     { name = "pymupdf" },
     { name = "python-dotenv" },
@@ -281,6 +281,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cadquery" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
@@ -291,9 +292,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.35,<2" },
-    { name = "cadquery", specifier = ">=2.6,<2.7" },
     { name = "certifi", specifier = ">=2026.7.22" },
     { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "pillow", specifier = ">=11,<13" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pymupdf", specifier = ">=1.26,<2" },
     { name = "python-dotenv", specifier = ">=1.1,<2" },
@@ -303,6 +304,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cadquery", specifier = ">=2.6,<2.7" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mypy", specifier = ">=1.15,<2" },
     { name = "pytest", specifier = ">=8,<9" },
