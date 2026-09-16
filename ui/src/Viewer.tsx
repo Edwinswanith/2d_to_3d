@@ -3,9 +3,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Expand, RotateCcw, Grid2X2 } from 'lucide-react';
 
-export type MeshData = { positions: number[]; indices: number[]; units: string };
+export type MeshData = { positions: number[]; indices: number[]; units: string; groups?: {start: number; count: number; feature_ids: string[]}[] };
 
-export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overlay?: ReactNode }) {
+export default function Viewer({ mesh, overlay, selectedFeature, legacy = false }: { mesh: MeshData | null; overlay?: ReactNode; selectedFeature?: string | null; legacy?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const reset = useRef<() => void>(() => {});
   const [error, setError] = useState('');
@@ -26,7 +26,7 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     const geometry = new THREE.BufferGeometry();
-    let material: THREE.Material;
+    let material: THREE.Material | THREE.Material[];
     let shape: THREE.Mesh;
     if (mesh) {
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(mesh.positions, 3));
@@ -34,14 +34,19 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
       geometry.computeVertexNormals();
       geometry.computeBoundingBox();
       geometry.center();
-      material = new THREE.MeshStandardMaterial({ color: '#b5c0b8', metalness: 0.58, roughness: 0.34, side: THREE.DoubleSide, polygonOffset: wireframe, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+      const surface = { side: THREE.DoubleSide, polygonOffset: wireframe, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
+      material = new THREE.MeshStandardMaterial({ color: '#b5c0b8', metalness: 0.58, roughness: 0.34, ...surface });
+      if (mesh.groups?.length) {
+        const highlight = new THREE.MeshStandardMaterial({color:'#82ab57',metalness:0.25,roughness:0.45,...surface});
+        material = [material,highlight];
+        mesh.groups.forEach(g => geometry.addGroup(g.start,g.count,selectedFeature && g.feature_ids.includes(selectedFeature) ? 1 : 0));
+      }
       shape = new THREE.Mesh(geometry, material);
       if (wireframe) {
-        const edges = new THREE.LineSegments(
+        shape.add(new THREE.LineSegments(
           new THREE.WireframeGeometry(geometry),
-          new THREE.LineBasicMaterial({ color: '#50635d', transparent: true, opacity: 0.35 }),
-        );
-        shape.add(edges);
+          new THREE.LineBasicMaterial({color:'#50635d',transparent:true,opacity:0.35}),
+        ));
       }
       shape.rotation.x = -Math.PI / 2;
     } else {
@@ -81,13 +86,13 @@ export default function Viewer({ mesh, overlay }: { mesh: MeshData | null; overl
           child.geometry.dispose(); (child.material as THREE.Material).dispose();
         }
       });
-      geometry.dispose(); shape.geometry.dispose(); material.dispose(); grid.geometry.dispose();
+      geometry.dispose(); shape.geometry.dispose(); (Array.isArray(material) ? material : [material]).forEach(m => m.dispose()); grid.geometry.dispose();
       (grid.material as THREE.Material).dispose(); renderer.dispose(); renderer.domElement.remove();
     };
-  }, [mesh, wireframe]);
+  }, [mesh, wireframe, selectedFeature]);
 
   return <div className="viewport">
-    <div className="viewport-header"><span><i className={mesh ? 'live-dot' : 'muted-dot'} />{mesh ? 'BODY PREVIEW' : '3D WORKSPACE'}</span><span className="mono">{mesh ? 'MODEL UNITS / MM' : 'ILLUSTRATION'}</span></div>
+    <div className="viewport-header"><span><i className={mesh ? 'live-dot' : 'muted-dot'} />{mesh ? legacy ? 'LEGACY BODY DRAFT' : 'FEATURE DRAFT' : '3D WORKSPACE'}</span><span className="mono">{mesh ? 'MODEL UNITS / MM' : 'ILLUSTRATION'}</span></div>
     <div ref={host} className="canvas-host" aria-label={mesh ? 'Interactive generated 3D body model' : 'Illustrative ring; upload a drawing to generate your model'} />
     {!mesh && <div className="viewport-copy"><span className="eyebrow">FROM SHEET TO SOLID</span><h2>Your drawing.<br />Another dimension.</h2><p>Upload a gland-ring drawing to see its body take shape here.</p></div>}
     {overlay}

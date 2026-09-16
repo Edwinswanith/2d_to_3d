@@ -63,9 +63,65 @@ def main(argv: list[str] | None = None) -> int:
     units.add_argument("--unit", choices=["mm", "in"], required=True)
     units.add_argument("--confirmed-by", required=True)
     units.add_argument("--reason", required=True)
+    audit = sub.add_parser(
+        "audit-drawing", help="Run Revision B independent inventory and evidence gate"
+    )
+    audit.add_argument("drawing", type=Path)
+    audit.add_argument("--output", type=Path, required=True)
+    audit.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0)
+    audit.add_argument(
+        "--replay", action="store_true", help="Verify and read saved artifacts; no model calls"
+    )
+    structure = sub.add_parser(
+        "check-structure", help="Measure a STEP against independent expectations"
+    )
+    structure.add_argument("step", type=Path)
+    structure.add_argument("expectations", type=Path)
+    revb_eval = sub.add_parser(
+        "eval-revb", help="Evaluate approved paired-data inventory and structural regressions"
+    )
+    revb_eval.add_argument("manifest", type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.command == "resolve-units":
+        if args.command == "audit-drawing":
+            from drawing2step.revb_pipeline import run_audit
+
+            result = run_audit(
+                args.drawing.read_bytes(),
+                args.drawing.name,
+                args.output,
+                rotation=args.rotate,
+                replay=args.replay,
+            )
+            _emit(
+                {
+                    "output": str(args.output.resolve()),
+                    "candidate": result["candidate"],
+                    "release": result["release"],
+                    "accuracy_gate": result["accuracy_gate"],
+                }
+            )
+            return 2 if result["candidate"] == "REVIEW" else 0
+        elif args.command == "check-structure":
+            from drawing2step.revb_geometry import check_structure, inspect_step
+
+            results = check_structure(args.step, json.loads(args.expectations.read_text()))
+            integrity = inspect_step(args.step)
+            _emit({"integrity": integrity, "checks": results})
+            return (
+                0
+                if integrity["status"] == "PASS"
+                and results
+                and all(c["status"] == "PASS" for c in results)
+                else 2
+            )
+        elif args.command == "eval-revb":
+            from drawing2step.revb_evaluation import evaluate_manifest
+
+            evaluation_result = evaluate_manifest(args.manifest)
+            _emit(evaluation_result)
+            return 2 if evaluation_result["status"] == "BLOCKED" else 0
+        elif args.command == "resolve-units":
             from drawing2step.unit_resolution import resolve_units
 
             print(str(resolve_units(args.run, args.unit, args.confirmed_by, args.reason).resolve()))

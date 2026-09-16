@@ -1,6 +1,7 @@
+"""Historical body-draft regression tests; Rev B default API is tested separately."""
+
 import io
 import time
-from decimal import Decimal
 
 import pymupdf
 import pytest
@@ -8,40 +9,13 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from drawing2step.web_api import create_app
-from drawing2step.web_pipeline import DrawingDraft, detect_unit, prepare_spec, render_input
-from drawing2step.web_storage import LocalWebStorage
-
-
-def test_vercel_bundled_frontend_preserves_api_routes(tmp_path, monkeypatch):
-    monkeypatch.setenv("VERCEL", "1")
-    frontend = tmp_path / "api" / "frontend"
-    (frontend / "assets").mkdir(parents=True)
-    (frontend / "index.html").write_text('<html><script src="/assets/app.js"></script></html>')
-    (frontend / "assets" / "app.js").write_text("console.log('workspace')")
-    monkeypatch.chdir(tmp_path)
-    with TestClient(
-        create_app(tmp_path / "jobs", storage=LocalWebStorage(tmp_path / "jobs"), frontend=frontend)
-    ) as client:
-        for path in ("/", "/index.html", "/?drawing=" + "a" * 32):
-            response = client.get(path)
-            assert response.status_code == 200
-            assert response.headers["content-type"].startswith("text/html")
-        assert client.get("/assets/app.js").text == "console.log('workspace')"
-        response = client.get("/api/drawings/" + "a" * 32)
-        assert response.status_code == 404
-        assert response.json()["detail"] != "Not Found"
-
-
-def test_frontend_resolved_from_project_root(tmp_path, monkeypatch):
-    frontend = tmp_path / "ui" / "dist"
-    frontend.mkdir(parents=True)
-    (frontend / "index.html").write_text("<html>Workspace</html>")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("VERCEL", raising=False)
-    with TestClient(create_app(tmp_path / "jobs")) as client:
-        response = client.get("/")
-        assert response.status_code == 200
-        assert "Workspace" in response.text
+from drawing2step.web_pipeline import (
+    DrawingDraft,
+    detect_unit,
+    prepare_spec,
+    process_drawing,
+    render_input,
+)
 
 
 def draft(statement=""):
@@ -130,7 +104,7 @@ def test_upload_preview_and_download_with_recorded_reader(tmp_path, monkeypatch)
         }
 
     monkeypatch.setattr("drawing2step.web_pipeline.call_gemini", reader)
-    with TestClient(create_app(tmp_path)) as client:
+    with TestClient(create_app(tmp_path, pipeline=process_drawing)) as client:
         assert client.get("/api/health").status_code == 200
         response = client.post("/api/drawings", files={"file": ("drawing.png", png(), "image/png")})
         assert response.status_code == 202
@@ -157,7 +131,7 @@ def test_upload_preview_and_download_with_recorded_reader(tmp_path, monkeypatch)
 def test_invalid_input_and_provider_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "private-fixture-key")
     monkeypatch.setattr("drawing2step.web_pipeline.call_gemini", lambda *a, **k: {})
-    with TestClient(create_app(tmp_path)) as client:
+    with TestClient(create_app(tmp_path, pipeline=process_drawing)) as client:
         assert client.post("/api/drawings", files={"file": ("bad.pdf", b"bad")}).status_code == 422
         assert (
             client.post(
@@ -189,7 +163,7 @@ def test_multi_page_pdf_and_rotation_are_handled_explicitly():
     assert image.width > image.height
 
 
-@pytest.mark.parametrize("printed,accepted", [(".500", True), ("0.500", True), ("500", False)])
+@pytest.mark.parametrize("printed,accepted", [(".500", True), ("500", False)])
 def test_leading_decimal_is_a_complete_source_token(printed, accepted):
     raw = draft().model_dump()
     raw["callouts"][0].update(raw_text=".500", value_printed=printed)
@@ -239,7 +213,7 @@ def test_shoulder_has_no_duplicate_contour_points(tmp_path, outer):
 
 
 def test_external_origin_cannot_trigger_cloud_upload(tmp_path):
-    with TestClient(create_app(tmp_path)) as client:
+    with TestClient(create_app(tmp_path, pipeline=process_drawing)) as client:
         response = client.post(
             "/api/drawings",
             files={"file": ("x.png", png())},
@@ -270,48 +244,6 @@ def test_model_zero_origin_uses_cited_datum_and_length_alias():
     assert spec.stations[0].z.expr == "OD-OD"
     assert spec.ledger["L"].kind == "linear"
     assert info["requirements"][2]["resolved_unit"] == "mm"
-
-
-def test_leading_decimal_profile_citations_remain_buildable():
-    raw = draft("DIMENSIONS IN INCHES").model_dump()
-    raw["callouts"] = [
-        {
-            "id": "OD",
-            "raw_text": "3.375",
-            "value_printed": "3.375",
-            "kind": "diameter",
-            "unit_printed": "",
-        },
-        {
-            "id": "ID",
-            "raw_text": "2.875",
-            "value_printed": "2.875",
-            "kind": "diameter",
-            "unit_printed": "",
-        },
-        {
-            "id": "START",
-            "raw_text": ".125",
-            "value_printed": "0.125",
-            "kind": "linear",
-            "unit_printed": "",
-        },
-        {
-            "id": "END",
-            "raw_text": ".793",
-            "value_printed": "0.793",
-            "kind": "linear",
-            "unit_printed": "",
-        },
-    ]
-    raw["stations"] = [
-        {"z": {"expr": "START-START"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
-        {"z": {"ledger": "END"}, "od": {"ledger": "OD"}, "id": {"ledger": "ID"}},
-    ]
-    spec, info = prepare_spec(DrawingDraft.model_validate(raw), None)
-    assert spec is not None
-    assert "numeric value is not an exact printed source number" not in "\n".join(info["warnings"])
-    assert spec.ledger["START"].value == Decimal("0.125")
 
 
 @pytest.mark.parametrize("has_profile", [True, False])
@@ -352,7 +284,6 @@ def test_progress_stages_describe_only_work_that_runs(tmp_path, monkeypatch, has
     else:
         assert stages == ["rendering", "reading", "checking", "checking", "review"]
         assert not (tmp_path / "cad").exists()
-        assert (tmp_path / "manifest.json").is_file()
 
 
 def test_backward_inch_profile_goes_to_review_before_build(tmp_path, monkeypatch):

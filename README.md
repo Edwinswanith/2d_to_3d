@@ -1,16 +1,102 @@
 # Drawing-to-STEP
 
-Local web workspace for uploading PDF/PNG/JPG gland-ring drawings, reading dimensions with
-Gemini, constructing a cited axisymmetric body, and viewing it in an interactive 3D viewer.
-Downloads include STEP and STL. **Models are unverified body drafts, not manufacturing releases.**
-Holes, pins, slots, ports and other omitted features appear in review notes. Full S0–S9
-reading acceptance, engineer review and production release remain future gated milestones.
+Revision B now connects independent drawing evidence to a traceable **draft** feature
+specification, deterministic CadQuery construction, STEP round trip, 3D preview and downloads.
+Unresolved requirements remain visible alongside the model. A usable draft is not a
+manufacturing release.
+
+See [Revision B implementation status](docs/REVISION_B.md) for supported geometry, review
+and correction APIs, validation limits, dataset requirements and remaining production work.
+
+## Current architecture · Revision B
+
+The diagram shows the implemented local draft workflow. Gemini proposes readings and feature
+specifications; typed Python contracts and deterministic geometry code validate and build them.
+Text reading and visual inventory use separate calls, and the visual call never receives the
+text reader's output. Document AI is an optional independent OCR source; without its configured
+processor and credentials, its evidence stays `UNAVAILABLE`.
+
+```mermaid
+flowchart TD
+    UI["React + Three.js<br/>Upload, 3D inspection and downloads"] --> API["FastAPI<br/>Job status and one CAD worker"]
+    API --> A["A · Intake<br/>Hash original, render, transform and extract native text"]
+
+    A --> U["U · Units and context<br/>Explicit units, identity and envelope"]
+    U -->|Resolved| B1["B1 · Gemini text reading"]
+    U -->|Unresolved| J["Review workspace<br/>Evidence overlays, findings and corrections"]
+    A --> B2["B2 · Independent visual inventory<br/>Whole sheet and view crops"]
+    A --> OCR["Optional pinned Document AI<br/>Fixed overlapping OCR tiles"]
+    A -->|Native text| C["C · Requirement ledger<br/>Preserve source readings and unmatched observations"]
+    B1 --> C
+    OCR --> C
+    C --> D["D · Completeness audit<br/>Coverage, feature categories and view counts"]
+    B2 --> D
+    D --> E["AS / R / E · Draft proposal<br/>Associations, assumptions and typed feature specification"]
+    E --> F["Validation and capability checks<br/>Citations, restricted expressions and required geometry"]
+    F --> G["G · CadQuery / OpenCascade<br/>Revolve profile and apply named feature operations"]
+    G --> RT["Export STEP and reimport B-rep"]
+    RT --> H["H1-H3 · Measured checks<br/>Values, structure and bounded section comparison"]
+    H --> J
+    RT --> PREVIEW["3D mesh, section SVGs and draft STEP/STL<br/>Available while review remains open"]
+    PREVIEW --> UI
+    J -->|Specification correction: new version and rebuild| E
+    J --> SIGN["Authenticated review decisions<br/>Bound to model version and manifest hash"]
+    SIGN --> RELEASE["Manufacturing release: BLOCKED<br/>Acceptance and CAM evidence service still required"]
+    EVAL["Paired-data evaluation harness<br/>Approved references and seeded structural faults"] -.-> RELEASE
+
+    A -.-> STORE[("Local filesystem artifacts<br/>Write-once evidence and model attempts<br/>Hashes, responses and manifests")]
+    E -.-> STORE
+    RT -.-> STORE
+    SIGN -.-> STORE
+
+    subgraph FUTURE["Remaining production architecture"]
+        CLOUD["PostgreSQL + object storage<br/>Shared-user access and deployment"]
+        ACCEPT["Approved acceptance / CAM evidence<br/>Atomic manufacturing release"]
+    end
+    STORE -.-> CLOUD
+    RELEASE -.-> ACCEPT
+
+    classDef pending fill:#fff3e6,stroke:#b97025,color:#593813
+    class CLOUD,ACCEPT,RELEASE pending
+```
+
+Draft availability and manufacturing approval are separate. Failed operations produce named
+findings and a clearly labelled partial draft. `UNKNOWN` stays unresolved; no `FAIL` can be
+waived. Source-evidence findings remain visible after construction. Failed rebuilds retain the
+last valid preview and downloads, while corrections create new versions and stale earlier
+sign-offs. Unsupported measurements return `UNKNOWN` rather than passing by default.
+
+| Responsibility | Implementation |
+| --- | --- |
+| Intake, independent readers and completeness audit | `revb_pipeline.py`, `revb_ocr.py`, `revb.py` |
+| Traceable spec proposals, assumptions and immutable build attempts | `revb_build_pipeline.py`, `revb_model.py` |
+| Deterministic B-rep construction and reimported STEP checks | `revb_model.py`, `revb_geometry.py`, `revb_sections.py` |
+| Versioned corrections, reviewer authorization and release blockers | `web_api.py`, `revb_review.py` |
+| 3D feature highlighting, source overlays and correction editor | `Viewer.tsx`, `RevisionBReview.tsx`, `ModelReview.tsx` |
+| Frozen paired-data evaluation and seeded-error scoring | `revb_evaluation.py` |
+
+The current builder supports turned profiles and grooves, axial hole patterns, tap-drill
+geometry, straight/oblique ports, cylindrical bore notches and circular chamfers. Markings
+remain report-only. This is not the complete production architecture: reliable automatic
+association, full source-section validation, production storage and manufacturing release
+remain unfinished. See the [detailed status and limitations](docs/REVISION_B.md).
+
+The existing Vercel/R2 deployment is retained as a separate legacy body-preview runtime.
+It does not run the Revision B pipeline or produce checked analytic STEP geometry:
+
+```mermaid
+flowchart LR
+    V["Vercel frontend"] --> L["api/index.py → legacy_web_api.py"]
+    L --> B["Legacy body reader + faceted exporter"]
+    L --> R[("Private Cloudflare R2 job artifacts")]
+    B --> P["Unverified body preview and downloads"]
+    P --> V
+    C["Revision B CadQuery container"] --> S["Analytic B-rep feature drafts"]
+```
 
 ## Web app
 
 Requires Python 3.12, uv, Node.js 20+, and `GEMINI_API_KEY` in the ignored `.env` or environment.
-By default, job files persist under ignored `work/web/`. For deployment, set the Cloudflare R2
-variables below and the web app stores every job artifact under `drawings/{job_id}/...`.
 
 ```sh
 uv sync --locked
@@ -19,50 +105,37 @@ npm run build --prefix ui
 uv run uvicorn drawing2step.web_api:app --host 127.0.0.1 --port 8000
 ```
 
-```sh
-CLOUDFLARE_R2_BUCKET=drawing2step
-CLOUDFLARE_R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
-CLOUDFLARE_R2_ACCESS_KEY_ID=...
-CLOUDFLARE_R2_SECRET_ACCESS_KEY=...
-# optional, defaults to drawings
-CLOUDFLARE_R2_PREFIX=drawings
-```
+Open http://127.0.0.1:8000. Upload a single PDF/PNG/JPG sheet, select the correct orientation,
+and generate a draft. Inspect the 3D model, feature coverage and source overlays; download
+STEP, STL, the ledger, specification and check report. Existing audits have a Build 3D draft
+action. Corrections create a new immutable model version and rerun construction and checks. Missing units now require review: Revision B supersedes
+the earlier default-mm policy. Selecting an override cannot silently contradict the sheet.
 
-Open http://127.0.0.1:8000. Upload one sheet, correct its orientation if necessary, and generate
-its body preview. Drag to orbit, scroll to zoom, toggle wireframe, reset, or expand the viewer.
-The generation overlay follows actual upload, preparation, reading, citation/unit checking,
-body construction and preview statuses. It displays elapsed session time without percentages
-or remaining-time estimates. Reduced-motion preferences stop its animations.
-Use STEP for CAD editing and STL for mesh workflows. Results persist under ignored `work/web/`
-locally or the configured R2 prefix in deployment; the result URL can reopen a saved drawing after
-refresh or a server restart.
+Generating sends drawing evidence to Gemini and, when configured, pinned Document AI. Tokens,
+provider responses, crops, transforms and versions stay in ignored local `work/web/` artifacts.
+Use the workspace on localhost. Reviewer writes require configured credentials; upload and
+draft views are local-only. Manufacturing release stays blocked until paired-data acceptance
+and CAM approval exist. Draft STEP downloads are explicitly labelled UNVERIFIED.
 
-Units default to mm. Explicit drawing cm/inch statements override the default, and explicit
-callout units override the drawing default. The optional unit selector corrects misleading
-sheet defaults; explicit callout units remain intact. CAD geometry is converted to mm with
-cm × 10 and inches × 25.4. Conflicting explicit statements stop generation for correction.
-Angles and counts are kept distinct from length units.
+New CLI commands: `audit-drawing`, `check-structure`, and `eval-revb`. Optional cloud OCR requires
+`uv sync --locked --extra cloud`, ADC credentials and `DOCUMENT_AI_PROCESSOR_VERSION`; see the
+Revision B guide. All tests use recorded responses or synthetic solids unless explicitly live.
 
-Generating sends the rendered drawing to Gemini. Credentials stay on the server. Run this
-single-shop prototype on localhost; authenticated customer review and public deployment
-remain gated work. Uploads are bounded to 20 MB and one sheet, with a three-job queue and
-one CAD worker. Interrupted jobs are marked failed on restart. Downloads require successful
-STEP round-trip integrity; dimensional association/completeness are still unverified.
+## Deployment runtimes
 
-For frontend development, run `npm run dev --prefix ui` with the API on port 8000. Vite serves
-port 5173 and proxies `/api`. API routes: POST `/api/drawings`, GET `/api/drawings/{id}`,
-and GET `/api/drawings/{id}/files/{drawing|mesh|step|stl|report}`.
+Revision B requires a persistent Python/CadQuery worker. Use the supplied `Dockerfile` or the
+local commands above. A minimal install needs `uv sync --locked --no-dev --extra cad` (add
+`--extra cloud` for Document AI); the default development install already includes CadQuery.
+Revision B currently stores artifacts locally. Its PostgreSQL/object-storage integration and
+production job orchestration are still pending.
 
-## Vercel deployment
+The existing `api/index.py`, `vercel.json`, `.python-version` and `scripts/build_frontend.py`
+retain the earlier Vercel deployment. The build copies the UI to `public/` and `api/frontend/`,
+with FastAPI serving the bundled fallback when necessary. The explicit entrypoint imports
+`legacy_web_api.py`, keeping heavyweight CadQuery out of that function. Use the repository
+root and the FastAPI framework preset; remove obsolete dashboard rewrites/output overrides.
 
-The repository includes `api/index.py`, `vercel.json`, and `.python-version` for Vercel. Vercel
-builds the React UI and copies it to `public/` using `scripts/build_frontend.py`. Static files
-are served by Vercel; a second copy in `api/frontend/` is explicitly included in the function
-and served by FastAPI when a request reaches the backend. API URLs retain their paths through
-the native FastAPI entrypoint.
-Use the repository root as the Vercel Root Directory and the FastAPI framework preset.
-Remove any dashboard rewrite or Output Directory override from earlier deployments.
-Configure these environment variables in Vercel Project Settings:
+The legacy backend can persist jobs in Cloudflare R2 using environment variables:
 
 ```sh
 GEMINI_API_KEY=...
@@ -71,15 +144,21 @@ CLOUDFLARE_R2_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
 CLOUDFLARE_R2_ACCESS_KEY_ID=...
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=...
 CLOUDFLARE_R2_PREFIX=drawings
-# optional for custom domains, comma-separated
+# Optional custom deployment host/origin allowlists
 DRAWING2STEP_ALLOWED_HOSTS=example.com,www.example.com
 DRAWING2STEP_ALLOWED_ORIGINS=https://example.com,https://www.example.com
 ```
 
-Keep the R2 bucket private. The app streams downloads through authenticated application routes.
-The Vercel web path uses a lightweight axisymmetric faceted exporter for mesh, STL, and STEP
-draft downloads so the Python function stays under Vercel's bundle limit. The heavier CadQuery
-round-trip verifier remains available for local CLI/dev validation.
+Keep the bucket private and place credentials only in environment settings or ignored `.env`.
+Legacy downloads are served through the application, but those routes are not authenticated
+user access controls. The UI labels this mode as a legacy body draft. It cannot satisfy Rev B
+completeness, B-rep, or release gates. Moving Revision B onto a hosted CAD worker remains
+deployment work; pushing this repository does not perform that migration.
+
+## Historical Rev A tools
+
+The commands below remain isolated feasibility and body-draft tools. Their passing checks do
+not establish Revision B acceptance or unlock full-part CAD.
 
 ## Run
 
@@ -92,9 +171,6 @@ uv run drawing2step init work/prerequisites.json
 uv run drawing2step readiness work/prerequisites.json
 uv run drawing2step demo --output work/lab
 ```
-
-CadQuery-backed CLI body verification is installed with the dev toolchain. In a minimal production
-install, use the web workflow or install dev dependencies before running `build-body`.
 
 The empty readiness manifest deliberately exits **2** and lists the missing prerequisites.
 The demo prints a run directory containing `report.html`, `cases.json`, `evaluation.json`,
@@ -120,9 +196,11 @@ requirement. Non-perfect scores are intentional fault-injection results.
 upload, or authenticate to any service. Manifest-relative paths resolve relative to the
 manifest's directory. Input paths may also be absolute.
 
-`ingest`, `run --through S9`, `resume`, production cloud adapters, Document AI, full-part CAD,
-authenticated review APIs, engineer sign-offs and release operations are **not implemented**. They remain ordered milestones
-in [the implementation handoff](docs/IMPLEMENTATION.md).
+The legacy `ingest`, `run --through S9` and `resume` interfaces remain unimplemented.
+Revision B provides the current audit/build workflow, optional Document AI adapter and
+authenticated local review decisions described above. Production cloud deployment and
+manufacturing release remain unfinished; the [Rev A handoff](docs/IMPLEMENTATION.md) is
+historical context, not the current implementation status.
 
 ## Reconciliation, association review, and body evaluation
 
@@ -151,7 +229,8 @@ authenticate a reviewer, or approve a manufacturing release.
 
 `build-body` accepts a closed schema of axial stations with outer/bore diameters. Every value
 must cite a dimension or use restricted dimensional arithmetic over citations. Nondecreasing
-axial coordinates and nested diameters define a revolved body with linear segments; holes, pins, slots, threads and ports are not supported in this version. Outputs are
+axial coordinates and nested diameters define a revolved body with linear segments; holes, pins,
+slots, threads and ports are not supported by this legacy command. Outputs are
 partial evaluation artifacts only, named `evaluation-body.step`, with recorded input spec,
 fresh STEP measurements and a verification report. Use a new output directory for each build.
 
@@ -215,8 +294,9 @@ to previously recorded hashes. File extensions are checked, not STEP/PDF structu
 Drawing identity is entered from the title block by a person; filenames never supply identity.
 
 Even a complete checklist returns `PREREQUISITES_RECORDED`, not production approval.
-CAD and release always remain `BLOCKED` in this version. Human verification of the supplied
-records and the subsequent accuracy gates remain mandatory.
+Prerequisite records alone never approve CAD or manufacturing release. Revision B permits
+unverified drafts; human verification and the subsequent accuracy gates remain mandatory
+for release.
 
 ## Synthetic evaluation behavior
 
@@ -249,6 +329,8 @@ uv run ruff format --check .
 uv run mypy src
 uv run pytest --cov=drawing2step --cov-report=term-missing --cov-fail-under=80
 uv build
+npm ci --prefix ui
+npm run build --prefix ui
 ```
 
 CI runs the static checks and tests on Python 3.12 using `uv.lock`. Tests use temporary

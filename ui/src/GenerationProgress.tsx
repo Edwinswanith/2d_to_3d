@@ -8,12 +8,14 @@ import './progress.css';
  */
 type Stage = { key: string; step: number; title: string; detail: string };
 
-const STEPS = ['Upload', 'Prepare sheet', 'Read dimensions', 'Check numbers', 'Build solid', '3D preview'];
+const STEPS = ['Upload', 'Prepare sheet', 'Read and inventory', 'Check coverage', 'Build solid', '3D preview'];
 
 const STAGES: Stage[] = [
   { key: 'uploading', step: 0, title: 'Sending your drawing', detail: 'Uploading the sheet to your workspace.' },
   { key: 'queued', step: 0, title: 'Lining up your drawing', detail: 'Waiting for the local worker to become available.' },
   { key: 'rendering', step: 1, title: 'Preparing the sheet', detail: 'Turning your file into a clear, upright image so every number is easy to read.' },
+  { key: 'context', step: 2, title: 'Checking identity and units', detail: 'Reading the title block before interpreting measurements. Missing or conflicting units need review.' },
+  { key: 'inventory', step: 2, title: 'Finding every visible feature', detail: 'Independently inventorying holes, ports, grooves, slots and markings in each view.' },
   { key: 'reading', step: 2, title: 'Reading the dimensions', detail: 'Finding the sizes, units and notes printed on the drawing. Reading a busy sheet can take time.' },
   { key: 'checking', step: 3, title: 'Checking the numbers', detail: 'Checking the source citations, unit conversions and profile inputs before building.' },
   { key: 'building', step: 4, title: 'Shaping the ring', detail: 'Spinning the side profile into a solid, the way a lathe turns a bar, then saving and reopening it to check its size and volume.' },

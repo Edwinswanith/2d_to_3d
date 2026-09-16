@@ -1,3 +1,5 @@
+> Superseded pipeline: Revision B is now authoritative. See [Revision B implementation status](REVISION_B.md).
+
 # Implementation handoff and milestone status
 
 The user-approved architecture is implemented in gated order. The empty repository and

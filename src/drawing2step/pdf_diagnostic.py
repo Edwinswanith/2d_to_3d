@@ -92,6 +92,8 @@ def call_gemini(
     *,
     prompt: str = PROMPT,
     schema: dict[str, Any] | None = None,
+    timeout: int = 60,
+    max_output_tokens: int = 16000,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"gemini-[a-zA-Z0-9.-]+", model):
         raise ValueError("Invalid Gemini model identifier")
@@ -113,7 +115,7 @@ def call_gemini(
         ],
         "generationConfig": {
             "temperature": 0,
-            "maxOutputTokens": 16000,
+            "maxOutputTokens": max_output_tokens,
             "responseMimeType": "application/json",
             "responseJsonSchema": schema or PdfReading.model_json_schema(),
         },
@@ -133,7 +135,7 @@ def call_gemini(
         with urllib.request.build_opener(
             NoRedirect(),
             urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=certifi.where())),
-        ).open(request, timeout=60) as response:
+        ).open(request, timeout=timeout) as response:
             result: dict[str, Any] = json.load(response)
             return result
     except urllib.error.HTTPError as error:
