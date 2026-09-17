@@ -263,17 +263,28 @@ def enrich_ledger(requirements: list[Requirement], drawing_unit: str) -> list[Re
         if r.kind == "note" and not r.geometry_driving:
             continue
         text = r.raw_text
+        # A numeric-numeric thread designation ('#10-24', '#8-32') and a degree-minutes angle
+        # ('22°30\'') both contain plain numbers that are never lengths on their own; each is
+        # handled as one whole unit below, so every number inside these spans is skipped here.
+        non_length_spans = [m.span() for m in re.finditer(r"#\d+-\d+", text)]
+        dms_matches = list(re.finditer(r"(\d+)°\s*(\d+)[′']", text))
+        non_length_spans.extend(m.span() for m in dms_matches)
         for index, match in enumerate(
             re.finditer(r"(?<![\d.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?![\d.])", text)
         ):
+            if any(start <= match.start() < end for start, end in non_length_spans):
+                continue
             token = match.group()
             # A number glued to letters is part of an identifier or a thread code
             # ('GEBK472722A', 'M8x1.25'), never a printed length; R.062 and 14MM/10X stay.
             head = text[: match.start()]
-            # Letters glued before (except R for a radius and X as a multiplier), or the
-            # 'x' of a thread pitch ('M8x1.25'), mark an identifier rather than a length.
-            glued_before = re.search(r"[A-QS-WYZa-qs-wyz]$", head) or re.search(
-                r"[A-Za-z]\d+(?:\.\d+)?[xX×]$", head
+            # Letters glued before (except R for a radius and X as a multiplier), the '#' of a
+            # numbered drill/thread size ('#10-24'), or the 'x' of a thread pitch ('M8x1.25'),
+            # mark an identifier rather than a length.
+            glued_before = (
+                re.search(r"[A-QS-WYZa-qs-wyz]$", head)
+                or re.search(r"[A-Za-z]\d+(?:\.\d+)?[xX×]$", head)
+                or head.endswith("#")
             )
             glued_after = re.match(r"[A-Za-z]", text[match.end() :]) and not re.match(
                 r"(?:MM|CM|IN|INCH(?:ES)?|DEG|X|NOS?|HOLES?|PL(?:CS|ACES)?|TYP)\b",
@@ -320,12 +331,11 @@ def enrich_ledger(requirements: list[Requirement], drawing_unit: str) -> list[Re
                     )
                 )
             )
-        dms = re.search(r"(\d+)°\s*(\d+)[′']", text)
-        if dms:
+        for i, dms in enumerate(dms_matches):
             value = Decimal(dms[1]) + Decimal(dms[2]) / 60
             result.append(
                 Requirement(
-                    id=f"{r.id}_angle",
+                    id=f"{r.id}_angle" if i == 0 else f"{r.id}_angle{i + 1}",
                     raw_text=dms[0],
                     kind="angle",
                     value=value,

@@ -26,6 +26,7 @@ from drawing2step.revb_proposal import (
     decode_proposal,
     geometry_feedback,
     rejected_features,
+    reliable_overall_length_mm,
     request_proposal,
     spec_schema,
     uncited_dimensions,
@@ -156,6 +157,8 @@ def build_from_audit(
     )
     if not any(r.value is not None and r.unit in {"mm", "cm", "in"} for r in requirements):
         raise ValueError("No readable length requirements to construct a profile")
+    from drawing2step.deployment import commit_sha  # local: avoid an import cycle at load time
+
     folder_id = uuid4().hex
     folder = directory / "models" / folder_id
     folder.mkdir(parents=True)
@@ -166,6 +169,7 @@ def build_from_audit(
         "original_sha256": audit["original_sha256"],
         "audit_sha256": hashlib.sha256((directory / "audit.json").read_bytes()).hexdigest(),
         "builder_version": BUILDER_VERSION,
+        "commit": commit_sha(),
         "model": model if corrected_spec is None else None,
         "spec_source": "model_proposal" if corrected_spec is None else "draft_correction",
         "implementation_sha256": hashlib.sha256(
@@ -198,9 +202,16 @@ def build_from_audit(
     request: Requester | None = None
     prompt = ""
     envelope_mm = _envelope_mm(audit)
+    raw_overall_mm = _context_length_mm(audit, "overall_length")
+    overall_mm = reliable_overall_length_mm(raw_overall_mm, requirements)
+    overall_length_unreliable = raw_overall_mm is not None and overall_mm is None
     inventory_ids = {f["id"] for f in (audit.get("inventory") or {"features": []})["features"]}
     if spec is None:
         key = load_api_key() if provider is None else ""
+        context_proposal = dict(audit.get("context_proposal") or {})
+        if overall_length_unreliable:
+            context_proposal["overall_length_value"] = None
+            context_proposal["overall_length_unit"] = None
         prompt = (
             SPEC_PROMPT
             + "\nLEDGER:\n"
@@ -216,7 +227,7 @@ def build_from_audit(
             + "\nINDEPENDENT INVENTORY:\n"
             + json.dumps(audit["inventory"])
             + "\nCONTEXT PROPOSAL:\n"
-            + json.dumps(audit.get("context_proposal"))
+            + json.dumps(context_proposal)
         )
         write_once(folder / "prompt.txt", prompt.encode())
         schema = spec_schema()
@@ -241,7 +252,6 @@ def build_from_audit(
         )
         if spec is None:
             raise ValueError("Feature specification unavailable after bounded attempts")
-    overall_mm = _context_length_mm(audit, "overall_length")
     spec, result = _construct_with_correction(
         folder, spec, requirements, prompt, envelope_mm, request, inventory_ids, overall_mm
     )
@@ -254,6 +264,23 @@ def build_from_audit(
         for i in f["inventory_ids"]
     }
     missing = [i for i in inventoried if i not in covered]
+    # Group by physical feature, not raw inventory id: the audit links repeat observations of
+    # one physical port/hole across views with same_physical_group, so a group only represents
+    # a genuine coverage gap when EVERY observation of it is uncovered. Restricted to the
+    # kinds SPEC_PROMPT requires as their own discrete, citable Feature (never folded into the
+    # profile the way a body/bore_step/groove/chamfer observation legitimately can be, and
+    # never a marking, which is text rather than a cut): losing one of these is a dropped
+    # physical feature, not an association nuance the profile already accounts for.
+    _discrete_kinds = {"hole_pattern", "tapped_hole", "port", "bore_slot", "od_slot"}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in inventory["features"]:
+        groups.setdefault(item.get("same_physical_group") or item["id"], []).append(item)
+    uncovered_features = [
+        (group, items)
+        for group, items in groups.items()
+        if all(item["id"] not in covered for item in items)
+        and any(item.get("type") in _discrete_kinds for item in items)
+    ]
     unused = uncited_dimensions(spec, requirements)
     associations = [a.model_dump(mode="json") for a in spec.associations]
     for a in associations:
@@ -271,6 +298,21 @@ def build_from_audit(
         }
         for i in missing
     ]
+    checks.extend(
+        {
+            "layer": "D",
+            "subject": group,
+            "status": "FAIL",
+            "detail": (
+                f"{next(i['type'] for i in items if i.get('type') in _discrete_kinds)} "
+                f"'{items[0]['description']}' was independently inventoried "
+                f"({', '.join(sorted(item['id'] for item in items))}) but no built feature cites "
+                "any of its observations; this is a physical feature the drawing shows and the "
+                "proposal dropped, not merely an unresolved association"
+            ),
+        }
+        for group, items in uncovered_features
+    )
     checks.extend(
         {
             "layer": "D",
@@ -306,6 +348,21 @@ def build_from_audit(
     checks.append(
         {"layer": "U", "subject": "context", "status": "PASS", "detail": audit["context"]["detail"]}
     )
+    if overall_length_unreliable:
+        checks.append(
+            {
+                "layer": "U",
+                "subject": "overall_length",
+                "status": "UNKNOWN",
+                "detail": (
+                    f"Context read the overall length as {raw_overall_mm:.3f} mm, but a "
+                    "printed linear dimension is longer than that; every printed length is a "
+                    "sub-span of the same axial chain, so the context reading cannot be the "
+                    "true envelope and was disregarded for construction and the axial-length "
+                    "check. Confirm the actual overall-length dimension by hand."
+                ),
+            }
+        )
     checks.append(axial_length_check(result["measurements"]["bbox"][2], requirements, overall_mm))
     ledger = {r.id: r for r in requirements}
     assumptions = {a.id: a for a in spec.assumptions}

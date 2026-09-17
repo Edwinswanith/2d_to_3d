@@ -1009,6 +1009,22 @@ def test_body_length_matching_no_printed_dimension_is_a_review_item(tmp_path):
     assert check["status"] == "UNKNOWN" and "10.000 mm matches no printed" in check["detail"]
 
 
+def test_body_matching_a_smaller_printed_dimension_than_the_largest_is_a_review_item(tmp_path):
+    # H = 20 mm is the largest printed length; SMALL = 6 mm is a genuine but unrelated one
+    # (e.g. a groove width). A body that ends at 6 mm while 20 mm is also on the sheet is not
+    # obviously correct just because 6 mm happens to be printed somewhere too.
+    rows = ledger() + [requirement("SMALL", 6)]
+    audit_directory(tmp_path, rows)
+    draft = spec([]).model_dump(mode="json")
+    draft["profile"][1]["z"] = draft["profile"][2]["z"] = {"expr": "SMALL"}
+    result = build_from_audit(
+        tmp_path, lambda _: None, corrected_spec=DraftSpec.model_validate(draft)
+    )
+    check = {c["subject"]: c for c in result["checks"]}["axial_length"]
+    assert check["status"] == "UNKNOWN"
+    assert "6.000 mm equals a printed linear dimension, but not the largest" in check["detail"]
+
+
 def test_axial_counterbores_enlarge_each_hole_from_the_host_face(tmp_path):
     counterbore = {
         "id": "cbores",
@@ -1161,6 +1177,88 @@ def test_a_body_shorter_than_the_printed_overall_length_fails_and_is_fed_back(tm
     assert result["measurements"]["bbox"][2] == pytest.approx(20)
 
 
+def test_context_overall_length_smaller_than_a_printed_dimension_is_disregarded(tmp_path):
+    # A local reference distance (5 mm) misread as the overall length; H = 20 mm is the only
+    # printed linear dimension, so nothing in the drawing can be shorter than it and still be
+    # "the whole part end to end". Trusting the 5 mm reading would truncate the body and let
+    # axial_length_check rubber-stamp that truncation against the very number that caused it.
+    audit_directory(tmp_path, ledger())
+    audit = json.loads((tmp_path / "audit.json").read_text())
+    audit["context_proposal"] = {"overall_length_value": 5, "overall_length_unit": "mm"}
+    raw = json.dumps(audit).encode()
+    (tmp_path / "audit.json").write_bytes(raw)
+    (tmp_path / "audit-manifest.json").write_text(
+        json.dumps({"artifacts": {"audit.json": hashlib.sha256(raw).hexdigest()}})
+    )
+    prompts = []
+
+    def provider(image, role, prompt, schema):
+        prompts.append(prompt)
+        return recorded(proposal_json(spec([])))
+
+    result = build_from_audit(tmp_path, lambda _: None, provider=provider)
+    assert '"overall_length_value": null' in prompts[0]
+    assert '"overall_length_value": 5' not in prompts[0]
+    assert result["measurements"]["bbox"][2] == pytest.approx(20)
+    by_subject = {c["subject"]: c for c in result["checks"]}
+    assert by_subject["overall_length"]["status"] == "UNKNOWN"
+    assert "cannot be the true envelope" in by_subject["overall_length"]["detail"]
+    assert by_subject["axial_length"]["status"] == "PASS"
+
+
+def test_uncovered_inventoried_port_becomes_a_named_failure_not_a_review_item(tmp_path):
+    audit_directory(tmp_path, ledger())
+    audit = json.loads((tmp_path / "audit.json").read_text())
+    audit["inventory"] = {
+        "features": [
+            {
+                "id": "quench_sec",
+                "type": "port",
+                "view": "Section A-A",
+                "description": "Quench port",
+                "same_physical_group": "quench",
+            },
+            {
+                "id": "flush_sec",
+                "type": "port",
+                "view": "Section B-B",
+                "description": "Flush port",
+                "same_physical_group": "flush",
+            },
+            {
+                "id": "flush_plan",
+                "type": "port",
+                "view": "plan",
+                "description": "Flush port, plan view",
+                "same_physical_group": "flush",
+            },
+            {
+                "id": "marking_note",
+                "type": "marking",
+                "view": "detail",
+                "description": "Proprietary marking",
+                "same_physical_group": None,
+            },
+        ]
+    }
+    raw = json.dumps(audit).encode()
+    (tmp_path / "audit.json").write_bytes(raw)
+    (tmp_path / "audit-manifest.json").write_text(
+        json.dumps({"artifacts": {"audit.json": hashlib.sha256(raw).hexdigest()}})
+    )
+    feature = port()
+    feature["inventory_ids"] = ["quench_sec"]
+    result = build_from_audit(tmp_path, lambda _: None, corrected_spec=spec([feature]))
+    by_subject = {c["subject"]: c for c in result["checks"]}
+    # The physical flush port (two views, one same_physical_group) was never built: FAIL, not
+    # a review-only UNKNOWN, since it is a dropped feature and not an association nuance.
+    assert by_subject["flush"]["status"] == "FAIL"
+    assert "port 'Flush port'" in by_subject["flush"]["detail"]
+    assert "flush_plan, flush_sec" in by_subject["flush"]["detail"]
+    # The marking has no built counterpart either, but markings are never cuts: no FAIL for it.
+    assert by_subject["marking_note"]["status"] == "UNKNOWN"
+
+
 def test_unit_corrected_sheets_measure_context_lengths_in_the_corrected_unit():
     from drawing2step.revb_build_pipeline import _context_length_mm
 
@@ -1186,6 +1284,10 @@ def test_unit_corrected_sheets_measure_context_lengths_in_the_corrected_unit():
             [("count", 10), ("diameter", Decimal("4.96")), ("linear", Decimal("9.52"))],
         ),
         ("SEE NOTE 3A", []),
+        # A numbered thread designation is an identifier, not two lengths (#10, then -24).
+        ("THEN #10-24 TAP .38 DEEP", [("linear", Decimal(".38"))]),
+        # Degrees-minutes is one angle (22 + 30/60), not an angle plus a stray 30-unit length.
+        ("22°30'", [("angle", Decimal("22.5"))]),
     ],
 )
 def test_numbers_glued_to_letters_are_identifiers_not_readings(text, expected):

@@ -433,6 +433,26 @@ def printed_lengths_mm(requirements: list[Requirement]) -> list[float]:
     ]
 
 
+def reliable_overall_length_mm(
+    overall_mm: float | None, requirements: list[Requirement]
+) -> float | None:
+    """Discard a context-stage overall length the ledger itself contradicts.
+
+    Every printed linear reading is a sub-span of the same axial chain, so none can exceed the
+    true overall length. A context value smaller than another printed length is not the
+    envelope-spanning dimension it claims to be — it is a nearby reference distance the context
+    stage picked up instead (e.g. a port's offset from a datum) — so it must not drive
+    construction or be trusted by axial_length_check; treat it as unread instead of wrong twice.
+    """
+    if overall_mm is None:
+        return None
+    lengths = printed_lengths_mm(requirements)
+    longest = max(lengths) if lengths else None
+    if longest is not None and overall_mm < longest - max(0.01 * longest, 0.05):
+        return None
+    return overall_mm
+
+
 def axial_length_check(
     length_mm: float, requirements: list[Requirement], overall_mm: float | None = None
 ) -> dict[str, str]:
@@ -441,9 +461,14 @@ def axial_length_check(
     When the context stage read the overall length, the body must equal it: too short (a
     missing step) and too long (a mis-chained stack) both FAIL and are fed once to the
     correction round. Without it, longer than every printed linear dimension is impossible
-    (FAIL); equal to one is PASS; anything else is a review item. This is a post-build check
-    rather than a proposal rejection: a body 0.5 mm over a drill depth is a mis-chained stack
-    worth naming, not a reason to lose the whole draft.
+    (FAIL); equal to the LARGEST printed linear dimension is PASS, since that is the only
+    reading that can be the true envelope; equal to some other, smaller printed length is a
+    review item rather than a silent PASS — every reading is a sub-span of the same axial
+    chain, so matching a small one while a larger one exists is exactly the sign the profile
+    stopped at the wrong reference distance rather than at the actual overall length; anything
+    else is a review item too. This is a post-build check rather than a proposal rejection: a
+    body 0.5 mm over a drill depth is a mis-chained stack worth naming, not a reason to lose
+    the whole draft.
     """
     lengths = printed_lengths_mm(requirements)
     longest = max(lengths) if lengths else None
@@ -472,10 +497,18 @@ def axial_length_check(
             f"dimension ({longest:.3f} mm); the overall length is printed, so re-derive the "
             "profile's axial chain from face A instead of adding non-adjacent dimensions",
         )
-    elif matched:
+    elif longest is not None and abs(length_mm - longest) <= max(0.01 * longest, 0.05):
         status, detail = (
             "PASS",
-            f"Body axial length {length_mm:.3f} mm equals a printed linear dimension",
+            f"Body axial length {length_mm:.3f} mm equals the largest printed linear dimension",
+        )
+    elif matched:
+        status, detail = (
+            "UNKNOWN",
+            f"Body axial length {length_mm:.3f} mm equals a printed linear dimension, but not "
+            f"the largest one ({longest:.3f} mm); every reading is a sub-span of the same "
+            "axial chain, so a larger one existing means this is likely a mis-chained profile "
+            "rather than the true overall length — confirm which reading is the envelope",
         )
     else:
         status, detail = (
