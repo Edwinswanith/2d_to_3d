@@ -18,6 +18,7 @@ FeatureType = Literal[
     "tapped_hole",
     "port",
     "bore_slot",
+    "od_slot",
     "marking",
     "other",
 ]
@@ -162,6 +163,9 @@ def evaluate_numeric(
         return number * scales.get(unit, Decimal(1)), "length" if unit in scales else unit
 
     def cited(key: str) -> tuple[Decimal, str]:
+        if key in assumptions and key not in ledger:
+            # A registered assumption may anchor an expression; it stays a visible finding.
+            return scaled(assumptions[key].value, assumptions[key].unit)
         if key not in ledger or ledger[key].value is None:
             raise ValueError(f"Unavailable citation {key}")
         r = ledger[key]
@@ -171,6 +175,13 @@ def evaluate_numeric(
     def visit(node: ast.AST) -> tuple[Decimal, str]:
         if isinstance(node, ast.Name):
             return cited(node.id)
+        if (
+            isinstance(node, ast.Constant)
+            and type(node.value) is int
+            and node.value in (0, 90, 180, 270)
+        ):
+            # An implied cardinal centreline may offset a printed angle: "180+R45_n1".
+            return Decimal(node.value), "degree"
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
             a, ak = visit(node.left)
             b, bk = visit(node.right)
@@ -182,7 +193,9 @@ def evaluate_numeric(
                 if node.right.value == 2:
                     a, kind = visit(node.left)
                     return a / 2, kind
-        raise ValueError("Only citations, +, - and /2 are permitted")
+        raise ValueError(
+            "Only citations, +, -, /2 and cardinal angle offsets (0, 90, 180, 270) are permitted"
+        )
 
     if value.ledger is not None:
         result, _ = cited(value.ledger)
@@ -236,35 +249,71 @@ def resolve_context(
                 "No explicit drawing units. Engineer context review required; no silent default."
             ),
         }
+    scales = {"mm": 1, "cm": 10, "in": 25.4}
+    sheet_plausible = (
+        envelope_value is not None and 0 < envelope_value * scales[unit] <= max_envelope_mm
+    )
     if override and override != unit:
+        if sheet_plausible or envelope_value is None:
+            return {
+                "status": "FAIL",
+                "unit": unit,
+                "sheet_unit": unit,
+                "detail": (
+                    "Selected units conflict with the sheet. "
+                    "Record an engineer correction before modelling."
+                ),
+            }
+        # The sheet contradicts itself: its stated unit makes the printed envelope impossible
+        # for this family. An explicit selection is then a recorded correction, not a guess.
+        selected_mm = envelope_value * scales[override]
+        if not 0 < selected_mm <= max_envelope_mm:
+            return {
+                "status": "FAIL",
+                "unit": unit,
+                "sheet_unit": unit,
+                "detail": (
+                    "Neither the sheet unit nor the selected unit gives a plausible envelope; "
+                    "context review required."
+                ),
+            }
         return {
-            "status": "FAIL",
-            "unit": unit,
+            "status": "PASS",
+            "unit": override,
+            "sheet_unit": unit,
+            "unit_correction": {
+                "sheet_unit": unit,
+                "selected_unit": override,
+                "envelope_value": envelope_value,
+            },
             "detail": (
-                "Selected units conflict with the sheet. "
-                "Record an engineer correction before modelling."
+                f"Sheet states {unit} but its printed envelope {envelope_value:g} {unit} is "
+                f"outside the family bound; the selected {override} is recorded as an "
+                "engineer unit correction and remains a visible finding."
             ),
         }
     if envelope_value is None:
         return {
             "status": "FAIL",
             "unit": unit,
+            "sheet_unit": unit,
             "detail": "Overall envelope unread; context review required",
         }
-    if envelope_value is not None:
-        mm = envelope_value * {"mm": 1, "cm": 10, "in": 25.4}[unit]
-        if not 0 < mm <= max_envelope_mm:
-            return {
-                "status": "FAIL",
-                "unit": unit,
-                "detail": (
-                    "Envelope outside provisional gland-ring bounds; "
-                    "units and envelope require review."
-                ),
-            }
+    if not sheet_plausible:
+        return {
+            "status": "FAIL",
+            "unit": unit,
+            "sheet_unit": unit,
+            "detail": (
+                f"Envelope {envelope_value:g} {unit} is outside provisional gland-ring bounds "
+                "under the sheet's stated unit. If the title block is wrong, upload again "
+                "selecting the correct unit to record a unit correction."
+            ),
+        }
     return {
         "status": "PASS",
         "unit": unit,
+        "sheet_unit": unit,
         "detail": (
             "Explicit units and title-block identity resolved; associations still require review"
         ),

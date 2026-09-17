@@ -69,7 +69,7 @@ sign-offs. Unsupported measurements return `UNKNOWN` rather than passing by defa
 | Responsibility | Implementation |
 | --- | --- |
 | Intake, independent readers and completeness audit | `revb_pipeline.py`, `revb_ocr.py`, `revb.py` |
-| Traceable spec proposals, assumptions and immutable build attempts | `revb_build_pipeline.py`, `revb_model.py` |
+| Traceable spec proposals, assumptions and immutable build attempts | `revb_proposal.py`, `revb_build_pipeline.py`, `revb_model.py` |
 | Deterministic B-rep construction and reimported STEP checks | `revb_model.py`, `revb_geometry.py`, `revb_sections.py` |
 | Versioned corrections, reviewer authorization and release blockers | `web_api.py`, `revb_review.py` |
 | 3D feature highlighting, source overlays and correction editor | `Viewer.tsx`, `RevisionBReview.tsx`, `ModelReview.tsx` |
@@ -117,7 +117,7 @@ Use the workspace on localhost. Reviewer writes require configured credentials; 
 draft views are local-only. Manufacturing release stays blocked until paired-data acceptance
 and CAM approval exist. Draft STEP downloads are explicitly labelled UNVERIFIED.
 
-New CLI commands: `audit-drawing`, `check-structure`, and `eval-revb`. Optional cloud OCR requires
+New CLI commands: `audit-drawing`, `check-structure`, `eval-revb`, and `accuracy` (score recorded runs against a transcribed drawing truth). Optional cloud OCR requires
 `uv sync --locked --extra cloud`, ADC credentials and `DOCUMENT_AI_PROCESSOR_VERSION`; see the
 Revision B guide. All tests use recorded responses or synthetic solids unless explicitly live.
 

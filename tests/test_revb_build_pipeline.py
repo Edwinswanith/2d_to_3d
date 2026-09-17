@@ -224,27 +224,72 @@ def test_section_visibility_is_not_treated_as_physical_pattern_count(tmp_path):
     assert result["completion"] == "DRAFT_REQUIRES_REVIEW"
 
 
-def test_grouped_provider_schema_requires_drill_geometry():
+def test_flat_provider_schema_stays_within_provider_limits_and_names_every_kind():
     schema = spec_schema()
-    for name in ["HoleProposal", "TapProposal", "PortProposal"]:
-        assert "depth" in schema["$defs"][name]["required"]
-        assert "angle" in schema["$defs"][name]["required"]
-    assert "hole_patterns" in schema["required"]
-    assert "ports" in schema["required"]
+    assert "features" in schema["required"]
+    feature = schema["$defs"]["Feature"]
+    assert set(feature["properties"]["kind"]["enum"]) == {
+        "hole_pattern",
+        "tapped_hole",
+        "port",
+        "bore_slot",
+        "od_slot",
+        "chamfer",
+        "counterbore",
+        "marking",
+    }
+    assert {"depth", "angle", "entry_diameter", "entry_depth"} <= set(feature["properties"])
+    # The grouped schema (about 8 KB) was rejected by the provider; keep the flat one small.
+    assert len(json.dumps(schema)) < 5000
 
 
-def test_invalid_centreline_retry_names_every_feature_without_inventing_assumptions():
+@pytest.mark.parametrize(
+    "kind,missing",
+    [("hole_pattern", "depth"), ("tapped_hole", "thread"), ("port", "angle")],
+)
+def test_flat_features_still_require_kind_specific_geometry(kind, missing):
     proposal = {
-        "ports": [
-            {"angle": {"mode": "centreline", "value": a, "reason": "unsupported angle"}}
+        "reference_face": "face_a",
+        "coordinate_policy": "Z into body",
+        "profile": [],
+        "features": [
+            {
+                "id": "f1",
+                "kind": kind,
+                "citations": ["R1"],
+                "host": "face_a" if kind != "port" else "outside",
+                "reference_face": "face_a",
+                "diameter": {"mode": "ledger", "value": "R1", "reason": ""},
+                "depth": {"mode": "ledger", "value": "R1", "reason": ""},
+                "pcd": {"mode": "ledger", "value": "R1", "reason": ""},
+                "count": {"mode": "ledger", "value": "R1", "reason": ""},
+                "z": {"mode": "ledger", "value": "R1", "reason": ""},
+                "angle": {"mode": "centreline", "value": "0", "reason": "shown"},
+            }
+        ],
+        "assumptions": [],
+        "associations": [],
+        "unresolved": [],
+    }
+    proposal["features"][0].pop(missing, None)
+    with pytest.raises(ValueError, match=missing):
+        decode_proposal(json.dumps(proposal))
+
+
+def test_non_cardinal_centrelines_become_named_implied_centreline_assumptions():
+    proposal = {
+        "features": [
+            {"angle": {"mode": "centreline", "value": a, "reason": "shown at this angle"}}
             for a in ["135", "45"]
         ]
     }
     with pytest.raises(ValueError) as caught:
         decode_proposal(json.dumps(proposal))
-    assert "$.ports[0].angle" in str(caught.value)
-    assert "$.ports[1].angle" in str(caught.value)
-    assert "register an assumption" in str(caught.value)
+    # The angles are no longer the rejection; only the missing top-level fields are.
+    assert "centreline value" not in str(caught.value)
+    proposal["features"] = [{"angle": {"mode": "centreline", "value": "west", "reason": ""}}]
+    with pytest.raises(ValueError, match=r"\$\.features\[0\]\.angle: centreline value 'west'"):
+        decode_proposal(json.dumps(proposal))
 
 
 @pytest.mark.parametrize("field,value", [("mode", []), ("mode", {}), ("reason", []), ("reason", 0)])
@@ -259,10 +304,8 @@ def test_grouped_recorded_proposal_builds_and_records_provider_response(tmp_path
     draft = source(tmp_path)
     (tmp_path / "drawing.png").write_bytes(b"synthetic fixture only")
     proposal = draft.model_dump(mode="json")
-    for key in ["schema_version", "provenance", "features"]:
+    for key in ["schema_version", "provenance"]:
         proposal.pop(key)
-    for group in ["hole_patterns", "tapped_holes", "ports", "bore_slots", "chamfers", "markings"]:
-        proposal[group] = []
 
     def wire(value):
         if isinstance(value, list):

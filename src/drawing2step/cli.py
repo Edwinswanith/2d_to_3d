@@ -81,6 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         "eval-revb", help="Evaluate approved paired-data inventory and structural regressions"
     )
     revb_eval.add_argument("manifest", type=Path)
+    accuracy = sub.add_parser(
+        "accuracy", help="Score recorded runs against transcribed drawing truth; no acceptance"
+    )
+    accuracy.add_argument("runs", type=Path, nargs="+")
+    accuracy.add_argument("--truth-dir", type=Path, default=Path("work/truth"))
+    accuracy.add_argument("--json", action="store_true", help="Emit full JSON instead of a table")
     args = parser.parse_args(argv)
     try:
         if args.command == "audit-drawing":
@@ -115,6 +121,19 @@ def main(argv: list[str] | None = None) -> int:
                 and all(c["status"] == "PASS" for c in results)
                 else 2
             )
+        elif args.command == "accuracy":
+            from drawing2step.revb_accuracy import score_runs, scoreboard
+
+            rows = score_runs(args.runs, args.truth_dir)
+            for row in rows:
+                (Path(args.runs[0]).parent / row["run"] / "accuracy.json").write_text(
+                    json.dumps(row, indent=2)
+                )
+            if args.json:
+                _emit(rows)
+            else:
+                print(scoreboard(rows))
+            return 0 if rows else 2
         elif args.command == "eval-revb":
             from drawing2step.revb_evaluation import evaluate_manifest
 

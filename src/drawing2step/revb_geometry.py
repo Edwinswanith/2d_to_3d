@@ -114,6 +114,13 @@ def _axial_band(shape: cq.Shape, e: dict[str, Any], tol: float) -> tuple[str, st
     return "PASS", "All actual axial face intervals match the expected outer and bore diameters"
 
 
+def _host_material_around(
+    shape: cq.Shape, x: float, y: float, diameter: float, z0: float, z1: float, tol: float
+) -> bool:
+    probe = cq.Solid.makeCylinder(diameter / 2 + 3 * tol, z1 - z0, cq.Vector(x, y, z0))
+    return shape.intersect(probe).Volume() > max(1e-6, probe.Volume() * 1e-7)
+
+
 def _hole_pattern(shape: cq.Shape, e: dict[str, Any], tol: float) -> tuple[str, str]:
     count = int(e["count"])
     if count != _number(e["count"]) or not 1 <= count <= 200:
@@ -160,7 +167,9 @@ def _hole_pattern(shape: cq.Shape, e: dict[str, Any], tol: float) -> tuple[str, 
             if start > covered + tol:
                 break
             covered = max(covered, end)
-        if covered < z1 - tol:
+        # A through hole in a flange thinner than the body exits into void; only a gap that
+        # still has host material around the corridor means the drill stopped short.
+        if covered < z1 - tol and _host_material_around(shape, x, y, diameter, covered, z1, tol):
             return "FAIL", f"Hole {i + 1} does not span its expected depth"
         # A hidden cap can split an apparently matching cylindrical wall.
         probe = cq.Solid.makeCylinder(diameter / 2 - tol, z1 - z0, cq.Vector(x, y, z0))
