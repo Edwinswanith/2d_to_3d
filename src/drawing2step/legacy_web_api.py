@@ -1,7 +1,10 @@
-"""Legacy body-preview API retained for the existing Vercel/R2 deployment.
+"""Retired: no deployment entrypoint imports this module.
 
-Revision B uses web_api.py and requires the CadQuery container/runtime. This module
-only preserves the earlier faceted body workflow; its artifacts cannot satisfy Rev B.
+`api/index.py` served this app on Vercel; it now serves `web_api.create_app` (Revision B)
+instead, so a feature-complete job can never silently land on this exporter, which
+classifies holes/ports/slots/threads as unsupported and cannot satisfy Revision B checks.
+Kept for historical reference and its own tests only. Do not wire it back into a deployment
+entrypoint without also giving it Revision B's feature construction and checks.
 """
 
 import os

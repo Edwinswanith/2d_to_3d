@@ -1,8 +1,3 @@
-import os
-import subprocess
-import sys
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
 from drawing2step.legacy_web_api import create_app
@@ -65,31 +60,5 @@ def test_legacy_runtime_labels_persisted_drafts_and_has_no_revb_build_route(tmp_
         assert "/api/drawings/{job_id}/build" not in client.get("/openapi.json").json()["paths"]
 
 
-def test_vercel_entrypoint_does_not_import_heavy_cad_runtime(tmp_path):
-    # Match the packaged Vercel entrypoint in isolation, without paid model/storage calls.
-    repo = Path(__file__).resolve().parents[1]
-    (tmp_path / "api" / "frontend").mkdir(parents=True)
-    (tmp_path / "api" / "frontend" / "index.html").write_text("<html>Legacy workspace</html>")
-    (tmp_path / "api" / "index.py").write_bytes((repo / "api" / "index.py").read_bytes())
-    script = """
-import importlib.abc, sys
-class NoCAD(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'cadquery', 'OCP', 'vtk'}:
-            raise RuntimeError('Heavy CAD runtime imported into Vercel')
-sys.meta_path.insert(0, NoCAD())
-from api.index import app
-assert app is not None
-assert 'drawing2step.revb_model' not in sys.modules
-"""
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLOUDFLARE_", "R2_"))}
-    env["PYTHONPATH"] = str(repo / "src")
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
+# The Vercel entrypoint (api/index.py) is retired from this app: see test_web.py's
+# test_vercel_entrypoint_runs_revision_b_not_the_legacy_workspace for what it does instead.

@@ -787,12 +787,15 @@ def run_audit(
         for p in directory.rglob("*")
         if p.is_file() and p.name not in {"status.json", "status.pending", "audit-manifest.json"}
     ]
+    from drawing2step.deployment import commit_sha  # local: avoid an import cycle at load time
+
     _save(
         directory,
         "audit-manifest.json",
         {
             "fingerprint": fingerprint,
             "version": PIPELINE_VERSION,
+            "commit": commit_sha(),
             "artifacts": {
                 str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in paths

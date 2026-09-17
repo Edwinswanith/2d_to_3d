@@ -1,7 +1,11 @@
 """Historical body-draft regression tests; Rev B default API is tested separately."""
 
 import io
+import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pymupdf
 import pytest
@@ -349,3 +353,34 @@ def test_backward_inch_profile_goes_to_review_before_build(tmp_path, monkeypatch
     assert "building" not in [state["status"] for state in updates]
     assert len(info["requirements"]) == len(proposal.callouts)
     assert not (tmp_path / "cad").exists()
+
+
+def test_vercel_entrypoint_runs_revision_b_not_the_legacy_workspace(tmp_path):
+    # api/index.py is retired from legacy_web_api (see its module docstring); this locks the
+    # replacement in place: Vercel must not silently regain the feature-incomplete exporter.
+    repo = Path(__file__).resolve().parents[1]
+    (tmp_path / "api" / "frontend").mkdir(parents=True)
+    (tmp_path / "api" / "frontend" / "index.html").write_text("<html>Revision B</html>")
+    (tmp_path / "api" / "index.py").write_bytes((repo / "api" / "index.py").read_bytes())
+    script = """
+from api.index import app
+from fastapi.testclient import TestClient
+import sys
+assert 'drawing2step.legacy_web_api' not in sys.modules
+client = TestClient(app)
+health = client.get('/api/health').json()
+assert health['mode'] == 'revision-b-draft-and-review'
+assert health['builder_version'] and health['pipeline_version'] and health['commit']
+assert 'hole_pattern' in health['supported_geometry']
+assert client.get('/').text == '<html>Revision B</html>'
+"""
+    env = {**os.environ, "PYTHONPATH": str(repo / "src")}
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

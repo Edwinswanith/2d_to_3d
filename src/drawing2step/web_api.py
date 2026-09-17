@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from drawing2step.deployment import deployment_info
 from drawing2step.revb_build_pipeline import build_from_audit
 from drawing2step.revb_model import DraftSpec
 from drawing2step.revb_pipeline import process_revb
@@ -43,6 +44,7 @@ def create_app(
     root: Path = Path("work/web"),
     *,
     pipeline: Callable[..., None] = process_revb,
+    frontend: Path | None = None,
 ) -> FastAPI:
     root.mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
@@ -116,8 +118,8 @@ def create_app(
             )
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "mode": "revision-b-draft-and-review"}
+    def health() -> dict[str, Any]:
+        return {"status": "ok", "mode": "revision-b-draft-and-review", **deployment_info()}
 
     def model_worker(
         directory: Path, request: BuildRequest, version: int, previous: dict[str, Any]
@@ -332,9 +334,9 @@ def create_app(
             else None,
         )
 
-    frontend = Path(__file__).resolve().parents[2] / "ui/dist"
-    if frontend.is_dir():
-        app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
+    resolved_frontend = frontend or Path(__file__).resolve().parents[2] / "ui/dist"
+    if resolved_frontend.is_dir():
+        app.mount("/", StaticFiles(directory=resolved_frontend, html=True), name="frontend")
     return app
 
 
