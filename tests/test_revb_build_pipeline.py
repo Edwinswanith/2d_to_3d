@@ -243,6 +243,17 @@ def test_flat_provider_schema_stays_within_provider_limits_and_names_every_kind(
     assert len(json.dumps(schema)) < 5000
 
 
+def test_compound_port_is_buildable_but_not_yet_proposable_to_the_provider():
+    # build_model/Feature support compound_port today; the prompt doesn't document it yet
+    # and its segments $ref would blow the provider's schema budget. Exposing a kind with
+    # no instructions would just invite malformed proposals, so it stays hidden here until
+    # the prompt is written.
+    schema = spec_schema()
+    assert "compound_port" not in schema["$defs"]["Feature"]["properties"]["kind"]["enum"]
+    assert "segments" not in schema["$defs"]["Feature"]["properties"]
+    assert "PortSegment" not in schema["$defs"]
+
+
 @pytest.mark.parametrize(
     "kind,missing",
     [("hole_pattern", "depth"), ("tapped_hole", "thread"), ("port", "angle")],

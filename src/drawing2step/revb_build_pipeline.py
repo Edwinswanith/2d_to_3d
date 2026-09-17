@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from drawing2step.final_verification import freeze_release
 from drawing2step.pdf_diagnostic import call_gemini, load_api_key
+from drawing2step.repair_controller import evaluate_repair
 from drawing2step.revb import Requirement
 from drawing2step.revb_model import (
     BUILDER_VERSION,
@@ -31,6 +33,8 @@ from drawing2step.revb_proposal import (
     spec_schema,
     uncited_dimensions,
 )
+from drawing2step.source_contract import default_contract_path, load_source_contract
+from drawing2step.source_verification import verify_contract
 from drawing2step.storage import canonical_json, write_once
 
 __all__ = ["build_from_audit", "decode_proposal", "spec_schema", "uncited_dimensions"]
@@ -46,6 +50,51 @@ _VISUAL_CLASSES = ({"hole_pattern", "tapped_hole"},)
 
 def _same_visual_class(observed: str, proposed: str) -> bool:
     return observed == proposed or any({observed, proposed} <= group for group in _VISUAL_CLASSES)
+
+
+# Kinds SPEC_PROMPT requires as their own discrete, citable Feature (never folded into the
+# profile the way a body/bore_step/groove/chamfer observation legitimately can be, and never a
+# marking, which is text rather than a cut): losing one of these is a dropped physical feature,
+# not an association nuance the profile already accounts for.
+_DISCRETE_KINDS = {"hole_pattern", "tapped_hole", "port", "bore_slot", "od_slot"}
+
+
+def _discrete_groups(inventory: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Every independently-inventoried physical feature, grouped across repeat observations.
+
+    The audit links repeat observations of one physical port/hole across views with
+    ``same_physical_group``; grouping first means a feature only ever counts once, regardless
+    of how many views observed it.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in inventory["features"]:
+        groups.setdefault(item.get("same_physical_group") or item["id"], []).append(item)
+    return [
+        (group, items)
+        for group, items in groups.items()
+        if any(item.get("type") in _DISCRETE_KINDS for item in items)
+    ]
+
+
+def _uncovered(
+    result_features: list[dict[str, Any]], groups: list[tuple[str, list[dict[str, Any]]]]
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Which of ``groups`` no built feature (of any status that keeps its geometry) cites.
+
+    A group counts as covered only when EVERY observation of it is uncovered — a group with one
+    covered observation is accounted for, not a coverage gap.
+    """
+    covered = {
+        i
+        for f in result_features
+        if f["status"] in {"BUILT", "REPORT_ONLY"}
+        for i in f["inventory_ids"]
+    }
+    return [
+        (group, items)
+        for group, items in groups
+        if all(item["id"] not in covered for item in items)
+    ]
 
 
 def _context_length_mm(audit: dict[str, Any], field: str) -> float | None:
@@ -77,6 +126,38 @@ def _construct(spec: DraftSpec, requirements: list[Requirement], outdir: Path) -
         raise
 
 
+def _augmented_checks(
+    result: dict[str, Any],
+    requirements: list[Requirement],
+    overall_mm: float | None,
+    groups: list[tuple[str, list[dict[str, Any]]]] | None = None,
+) -> list[dict[str, Any]]:
+    """``result["checks"]`` plus the profile's axial-length check and per-group coverage.
+
+    ``axial_length_check`` is computed separately in ``build_from_audit`` (it needs the final
+    exported bbox), so it never appears in ``build_model``'s own checks; ``evaluate_repair``
+    still needs to see it — a repair that fixes the profile's length must count as progress,
+    and one that breaks it must count as a regression, the same as any feature-level check.
+    Coverage of ``groups`` (independently-inventoried physical features) is added the same way:
+    a repair that finally builds a dropped feature must count as progress, and one that drops a
+    previously-covered feature must count as a regression, not silently pass either way.
+    """
+    axial = axial_length_check(result["measurements"]["bbox"][2], requirements, overall_mm)
+    checks = [*result["checks"], {"layer": "PROFILE", "subject": "profile", **axial}]
+    if groups:
+        uncovered = {group for group, _ in _uncovered(result["features"], groups)}
+        checks.extend(
+            {
+                "layer": "D",
+                "subject": group,
+                "status": "FAIL" if group in uncovered else "PASS",
+                "detail": "coverage",
+            }
+            for group, _ in groups
+        )
+    return checks
+
+
 def _construct_with_correction(
     folder: Path,
     spec: DraftSpec,
@@ -85,19 +166,28 @@ def _construct_with_correction(
     envelope_mm: float | None,
     request: Requester | None,
     inventory_ids: set[str],
+    inventory: dict[str, Any],
     overall_mm: float | None = None,
 ) -> tuple[DraftSpec, dict[str, Any]]:
-    """Build the proposal; feed named construction failures back once; keep the better draft.
+    """Build the proposal; feed named construction and coverage failures back once.
 
     Each draft is built in its own numbered folder so both remain inspectable; the winner's
     files are promoted into the model folder. An engineer-corrected spec is never re-asked.
     """
+    groups = _discrete_groups(inventory)
     result = _construct(spec, requirements, folder / "draft-1")
     failures = construction_failures(result, spec, requirements, overall_mm)
-    drafts = [{"draft": "draft-1", "failed": [f for f, _ in failures]}]
+    gaps = _uncovered(result["features"], groups)
+    drafts = [
+        {
+            "draft": "draft-1",
+            "failed": [f for f, _ in failures],
+            "uncovered": [group for group, _ in gaps],
+        }
+    ]
     winner = "draft-1"
-    if failures and request is not None:
-        corrected = prompt + geometry_feedback(spec, failures)
+    if (failures or gaps) and request is not None:
+        corrected = prompt + geometry_feedback(spec, failures, gaps)
         write_once(folder / "correction-prompt.txt", corrected.encode())
         revised = request_proposal(
             folder,
@@ -116,14 +206,24 @@ def _construct_with_correction(
                 drafts.append({"draft": "draft-2", "failed": ["construction raised"]})
             else:
                 remaining = construction_failures(second, revised, requirements, overall_mm)
-                # A correction that deletes a failing feature is not an improvement: every
-                # feature the first draft proposed but the revision no longer builds counts
-                # against it, so only a draft that fixes more than it drops is promoted.
-                dropped = sorted({f.id for f in spec.features} - {f.id for f in revised.features})
-                drafts.append(
-                    {"draft": "draft-2", "failed": [f for f, _ in remaining], "dropped": dropped}
+                remaining_gaps = _uncovered(second["features"], groups)
+                removed = sorted({f.id for f in spec.features} - {f.id for f in revised.features})
+                outcome = evaluate_repair(
+                    spec,
+                    _augmented_checks(result, requirements, overall_mm, groups),
+                    revised,
+                    _augmented_checks(second, requirements, overall_mm, groups),
                 )
-                if len(remaining) + len(dropped) < len(failures):
+                drafts.append(
+                    {
+                        "draft": "draft-2",
+                        "failed": [f for f, _ in remaining],
+                        "uncovered": [group for group, _ in remaining_gaps],
+                        "dropped": removed,
+                        "promotion_reason": outcome.reason,
+                    }
+                )
+                if outcome.accepted:
                     spec, result, winner = revised, second, "draft-2"
     for path in list((folder / winner).iterdir()):
         path.rename(folder / path.name)
@@ -205,7 +305,8 @@ def build_from_audit(
     raw_overall_mm = _context_length_mm(audit, "overall_length")
     overall_mm = reliable_overall_length_mm(raw_overall_mm, requirements)
     overall_length_unreliable = raw_overall_mm is not None and overall_mm is None
-    inventory_ids = {f["id"] for f in (audit.get("inventory") or {"features": []})["features"]}
+    inventory = audit.get("inventory") or {"features": []}
+    inventory_ids = {f["id"] for f in inventory["features"]}
     if spec is None:
         key = load_api_key() if provider is None else ""
         context_proposal = dict(audit.get("context_proposal") or {})
@@ -253,9 +354,16 @@ def build_from_audit(
         if spec is None:
             raise ValueError("Feature specification unavailable after bounded attempts")
     spec, result = _construct_with_correction(
-        folder, spec, requirements, prompt, envelope_mm, request, inventory_ids, overall_mm
+        folder,
+        spec,
+        requirements,
+        prompt,
+        envelope_mm,
+        request,
+        inventory_ids,
+        inventory,
+        overall_mm,
     )
-    inventory = audit.get("inventory") or {"features": []}
     inventoried = {f["id"]: f for f in inventory["features"]}
     covered = {
         i
@@ -264,23 +372,7 @@ def build_from_audit(
         for i in f["inventory_ids"]
     }
     missing = [i for i in inventoried if i not in covered]
-    # Group by physical feature, not raw inventory id: the audit links repeat observations of
-    # one physical port/hole across views with same_physical_group, so a group only represents
-    # a genuine coverage gap when EVERY observation of it is uncovered. Restricted to the
-    # kinds SPEC_PROMPT requires as their own discrete, citable Feature (never folded into the
-    # profile the way a body/bore_step/groove/chamfer observation legitimately can be, and
-    # never a marking, which is text rather than a cut): losing one of these is a dropped
-    # physical feature, not an association nuance the profile already accounts for.
-    _discrete_kinds = {"hole_pattern", "tapped_hole", "port", "bore_slot", "od_slot"}
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for item in inventory["features"]:
-        groups.setdefault(item.get("same_physical_group") or item["id"], []).append(item)
-    uncovered_features = [
-        (group, items)
-        for group, items in groups.items()
-        if all(item["id"] not in covered for item in items)
-        and any(item.get("type") in _discrete_kinds for item in items)
-    ]
+    uncovered_features = _uncovered(result["features"], _discrete_groups(inventory))
     unused = uncited_dimensions(spec, requirements)
     associations = [a.model_dump(mode="json") for a in spec.associations]
     for a in associations:
@@ -304,7 +396,7 @@ def build_from_audit(
             "subject": group,
             "status": "FAIL",
             "detail": (
-                f"{next(i['type'] for i in items if i.get('type') in _discrete_kinds)} "
+                f"{next(i['type'] for i in items if i.get('type') in _DISCRETE_KINDS)} "
                 f"'{items[0]['description']}' was independently inventoried "
                 f"({', '.join(sorted(item['id'] for item in items))}) but no built feature cites "
                 "any of its observations; this is a physical feature the drawing shows and the "
@@ -364,6 +456,12 @@ def build_from_audit(
             }
         )
     checks.append(axial_length_check(result["measurements"]["bbox"][2], requirements, overall_mm))
+    contract_path = default_contract_path(directory)
+    if contract_path.is_file():
+        # Independent of the candidate: the delivered STEP is re-measured against a hand-
+        # reviewed accepted contract, never against the parameters that generated the model.
+        contract = load_source_contract(contract_path)
+        checks.extend(verify_contract(folder / result["step"], contract))
     ledger = {r.id: r for r in requirements}
     assumptions = {a.id: a for a in spec.assumptions}
     built_ids = {f["id"] for f in result["features"] if f["status"] == "BUILT"}
@@ -478,6 +576,12 @@ def build_from_audit(
         for a in associations
     )
     _save(folder, "checks.json", checks)
+    release = freeze_release(
+        folder / result["step"],
+        checks,
+        source_contract_path=contract_path if contract_path.is_file() else None,
+    )
+    _save(folder, "release.json", release.model_dump(mode="json"))
     _save(
         folder,
         "manifest.json",

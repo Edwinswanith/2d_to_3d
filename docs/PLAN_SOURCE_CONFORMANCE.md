@@ -20,9 +20,9 @@ Verified by reading the live source, not re-running the reviewer's probes.
 |---|---|---|---|
 | F1 | Two runtimes shipped (legacy Vercel path vs. Revision B Docker path) | **Done (2026-09-17)** | `api/index.py` now serves `web_api.create_app` (Revision B); `legacy_web_api.py` is unwired and its module docstring says so. Health and every job manifest (audit-manifest.json, model inputs.json) carry `pipeline_version`, `builder_version`, `commit`, `supported_geometry` (new `deployment.py`). Regression: `test_web.py::test_vercel_entrypoint_runs_revision_b_not_the_legacy_workspace` fails if this ever regresses. **New caveat surfaced by this change, not yet solved:** Revision B's job storage is local disk (`root`), with no cross-instance persistence layer; the legacy runtime specifically used R2 (`web_storage.py`) because a status poll can land on a different serverless instance than the one running the build thread. Vercel deployment of Revision B is correctness-risky under real multi-instance traffic until a durable storage layer exists — the Docker deployment (persistent disk) is the reliable target in the meantime. Noted in `api/index.py`'s docstring. |
 | F2 | Harness infrastructure already substantial | Unchanged, agreed | No action beyond wiring it correctly (below). |
-| F3 | Candidate self-checks, not source-checked | **Still open, but the mechanism is proven** | `check_structure`/`_axial_band` (`revb_geometry.py`) run automatically at `revb_model.py:823`, but `expectations` are appended from the same `value(...)` calls used to cut the feature (`revb_model.py:487-497` etc.) — self-referential. This session added one genuinely independent check: `axial_length_check` compares the built body against the context stage's own separate reading of the printed overall length (`revb_proposal.py`), and it already catches a wrong-length body the builder's own checks pass. That is the F3 pattern working exactly once; it needs to generalize to every dimension, not just overall length. |
-| F4 | `datum` resolves to zero with no registry | **Confirmed still open** | `Numeric.datum: str | None` (`revb.py:135`) is a bare label; nothing stores a plane/axis per datum name. `revb_proposal.py`'s prompt still just asks the model to declare "face A at z=0" as a string convention. |
-| F5 | Threaded port too coarse for compound features | **Partially improved, still open for the hard case** | This session added: printed flat/tap drill as `entry_diameter` distinct from the follow-on `diameter`, and a bottomed-drill case (`entry_depth == depth`). But entry and follow-on still share one `theta`/`phi` (`revb_model.py:535-578`) — there is still no way to place the flushing axis at one z/tilt and the follow-on drill at a different z/tilt, which is exactly the 2H-66033 case (0.98 in vs. 1.06 in, 21° incline). |
+| F3 | Candidate self-checks, not source-checked | **Milestone B lands a genuinely independent verifier (2026-09-17), not yet wired to real drawings** | New `source_contract.py`/`datums.py`/`source_verification.py`: `verify_contract(step_path, contract)` re-imports the STEP fresh and measures it against a hand-authored, reviewed `SourceContract` — never against the candidate's own `Numeric` citations. `build_from_audit` runs it automatically whenever `source-contract.json` exists next to the audit (`revb_build_pipeline.py`), so this is wired into the *normal* build path, not a side script. Regression `test_an_accepted_source_contract_rejects_a_wrong_bore_through_the_normal_pipeline` reproduces the review's own probe end to end: an 80 mm bore built from a misread 80 mm ledger entry passes every existing (self-referential) check, and only the independent contract check FAILs it. Still open: no contract yet exists for the three real drawings this session tested (GEBK472722A, 2H-183624, 1H-141756, 2H-66033, 1H-139899) — Milestone B's schema is proven on a synthetic fixture, not yet turned loose on them; and `verify_contract` only covers `axial_band`/`hole_pattern`/`passage` shapes (reusing `check_structure`'s three existing handlers) — no shoulder-plane or "drill reaches this groove" connectivity handler yet, so F7-style connectivity claims remain unverified independently. |
+| F4 | `datum` resolves to zero with no registry | **Done for independent verification (2026-09-17); done for the candidate path too, but only through profile_compiler.py, not yet through `Numeric` itself** | New `datums.py`: `DatumRegistry.resolve(name)` raises on any name it wasn't given evidence for, and only `face_a` is ever implicit (defined as the coordinate origin, not defaulted). `source_contract.py`'s `SourceContract` validates at load time that every requirement's `referenced_to` resolves, so a contract citing an unregistered datum fails to load rather than silently measuring from the wrong place — reproduces the plan's own worked example (2H-66033's port at 0.980 in from datum -A-, itself 0.125 in from face A, resolves to an absolute 1.105 in, not 0.980 in). New `profile_compiler.py`'s `AxialPosition` (`{datum, offset}`) reproduces the exact same worked example for the *candidate construction* path (`test_a_span_offset_from_a_registered_datum_is_not_the_bare_local_number`), by resolving through `DatumRegistry` directly rather than through `Numeric.datum`. Deliberately **still** unchanged: `revb.py:210`'s `evaluate_numeric` itself (used by every plain `Numeric`, i.e. every `Feature` field and every raw `DraftSpec.profile` point) still resolves any `Numeric.datum` to `Decimal(0)` — extending the shared evaluator so `Feature.z`/`depth`/etc. could ALSO cite a real second datum (not just profile spans) would mean changing code every other candidate-facing field depends on; that is a larger, riskier change than adding a new, opt-in module, and is not done here. |
+| F5 | Threaded port too coarse for compound features | **Done for the general case (2026-09-17)** | New `Feature.kind == "compound_port"` (`revb_model.py`): a `segments: list[PortSegment]` field, each segment its own independent `z`/`angle`/`tilt`/`diameter`/`thread`/`termination`, generalizing beyond the review's own two-axis (`entry_axis`/`follow_on_axis`) sketch to N independently-angled stages fused into one cutter. Plain `port` is untouched and stays right whenever one shared axis is actually correct (unchanged: printed flat/tap drill as `entry_diameter` distinct from the follow-on `diameter`, bottomed-drill case). Regression `test_a_reviewed_compound_port_spec_cuts_two_independently_angled_segments` builds a two-segment port (15°/20° tilt, independently positioned and thread-sized) via `build_model` directly and confirms both segments' passages measure `PASS` through `check_structure`. **Not yet done:** `compound_port` is buildable but deliberately not proposable — `spec_schema()` strips `segments`/`compound_port` from the provider-facing schema (a full `PortSegment` `$ref` pushed the flat schema from ~3.9 KB past its ~5 KB provider budget, and `SPEC_PROMPT` doesn't document the kind yet), so extraction still can't produce one; and the acceptance test uses synthetic numbers, not 2H-66033's own (0.98 in/1.06 in/21°) — no source contract exists yet for that sheet to drive a same-numbers regression. |
 | F6 | Repair loop too narrow | **Substantially reworked, one real gap and one live bug remain** | Already done: provider-fault vs. schema-rejection budgets are separate (`revb_proposal.request_proposal`); the correction round is bounded to one attempt (`_construct_with_correction`); promotion now requires the revision to fix more than it drops (`dropped` in `drafts.json`) — closing exactly the "delete the failing feature" loophole the review names. Still open: `build_from_audit` computes uncited-dimension and inventory-association checks *after* `_construct_with_correction` returns, so those D-layer failures never reach `construction_failures` and never trigger the one repair round. Live bug: `geometry_feedback` (`revb_proposal.py:641`) says "keep... the profile... exactly as before" even when the fed-back failure is the profile's own axial length (`construction_failures` inserts `("profile", ...)` — `revb_proposal.py`) — a direct self-contradiction in the prompt. |
 | F7 | Sections aren't drawing-section validation | **Still open** | `revb_sections.py` compares ordered edge types/turning adjacency against a reviewed reference; still no metric dimension check, still fixed XZ/YZ planes. |
 | F8 | No fine-crop tool for spec/repair stage | **Still open** | `build_from_audit` sends one whole `drawing.png` per spec/correction call; the per-view crops that exist for the inventory stage are not reachable from spec or repair. |
@@ -88,21 +88,58 @@ customer's job actually ran.
 
 ### Milestone B — Source contract, datum registry, and an independent verifier (P0, ~4–6 days)
 
+**Status: minimum version done (2026-09-17).** `datums.py`, `source_contract.py`,
+`source_verification.py` exist and are wired into `build_from_audit` (whenever
+`source-contract.json` sits next to `audit.json`, its requirements are re-measured against a
+freshly reimported STEP and added to `checks.json` as `layer: "SRC"`, independent of anything
+the candidate cited). The acceptance test named below — an 80 mm bore against an accepted 40 mm
+requirement fails automatically, no manual script — passes
+(`tests/test_revb_drawing_edges.py::test_an_accepted_source_contract_rejects_a_wrong_bore_through_the_normal_pipeline`).
+The schema and prose below describe the milestone as first envisioned; the shipped version is
+deliberately smaller — see the "What actually shipped vs. this sketch" note after it before
+reading the code sketches as current.
+
 This is the core of the review and the one milestone that must land before anything else in
 this list is worth doing — a repair controller with nothing independent to check against just
 repairs the model's own opinion faster.
+
+**What actually shipped vs. this sketch, and what's still open:**
+- `DatumRegistry` (in `datums.py`) is simpler than sketched below: one flat list of named
+  positions in mm from `face_a`, no separate `plane`/`axis` kind, no `z_of(ledger, assumptions)`
+  resolution against the candidate's own citations — a datum's position is a plain reviewed
+  number, not itself computed from ledger readings. That was enough for the acceptance test and
+  keeps the registry's own correctness independent of any ledger-parsing bug.
+- `SourceContract`/`SourceRequirement` (in `source_contract.py`) use three concrete shapes —
+  `axial_band`, `hole_pattern`, `passage` — mirroring `check_structure`'s three existing
+  handlers exactly, rather than the free-form `ContractFeature`/`dimensions` dict sketched
+  below. That covers bore/OD-over-a-span, axial hole patterns, and radial ports/drills; it does
+  **not** yet cover a shoulder plane in isolation or a named `connectivity` claim like "must
+  reach groove_lo" — `check_structure` has no handler for either, so `source_verification.py`
+  can't ask for one yet. Extending both is still open.
+- No contract exists yet for any of the three real sheets this session tested against
+  (GEBK472722A, 2H-183624, 1H-141756) or the two added later (2H-66033, 1H-139899) — the
+  acceptance test uses a synthetic fixture, per the review's own "initially, use manually
+  reviewed drawing contracts to test the rest of the pipeline." Authoring one by hand for a real
+  sheet, end to end, is the natural next step before trusting this on held-out drawings.
+- The "mutation battery" below (remove a hole, move a shoulder, shift a port off datum,
+  stop a drill short, wrong cavity, dimension just outside tolerance) is not written; only the
+  bore-mismatch case from the review's own probe has a regression test so far.
+- `evaluate_numeric` (the candidate's own construction path, `revb.py:210`) is untouched — see
+  the F4 row above for why that is a deliberate, currently-low-risk scoping choice, not an
+  oversight.
 
 **New module `datums.py`:**
 
 ```python
 class Datum(Contract):
-    id: str                          # "face_A", "projecting_front_face"
+    id: str  # "face_A", "projecting_front_face"
     kind: Literal["plane", "axis"]
-    z_from_origin: Numeric | None     # None until resolved against the modelling origin
+    z_from_origin: Numeric | None  # None until resolved against the modelling origin
     reason: str
 
+
 class DatumRegistry(Contract):
-    origin: str                       # which datum id is z=0 in the modelling frame
+    origin: str  # which datum id is z=0 in the modelling frame
     datums: list[Datum]
 
     def z_of(self, datum_id: str, ledger, assumptions) -> Decimal: ...
@@ -124,23 +161,25 @@ class ContractDimension(Contract):
     nominal: Numeric
     tolerance_plus: Numeric | None
     tolerance_minus: Numeric | None
-    datum_from: str | None            # datum id this is measured from, when axial
+    datum_from: str | None  # datum id this is measured from, when axial
+
 
 class ContractFeature(Contract):
     id: str
-    kind: str                          # same kind vocabulary as Feature
+    kind: str  # same kind vocabulary as Feature
     dimensions: dict[str, ContractDimension]
-    pattern_frame: str | None          # datum/angle this pattern's angles are measured from
-    connectivity: str | None           # e.g. "must reach groove_lo" — free text, checked below
+    pattern_frame: str | None  # datum/angle this pattern's angles are measured from
+    connectivity: str | None  # e.g. "must reach groove_lo" — free text, checked below
+
 
 class SourceContract(Contract):
     drawing_number: str
     revision: str
     unit: Unit
     datums: DatumRegistry
-    body: list[ContractDimension]      # every stepped OD/bore/shoulder, ordered
+    body: list[ContractDimension]  # every stepped OD/bore/shoulder, ordered
     features: list[ContractFeature]
-    notes: list[str]                   # non-geometric obligations, kept visible not modelled
+    notes: list[str]  # non-geometric obligations, kept visible not modelled
     reviewed_by: str
     reviewed_at: str
 ```
@@ -181,23 +220,70 @@ def verify_contract(step_path: Path, contract: SourceContract) -> list[Check]:
 The review is explicit that a stronger model can't compensate for a representation with no
 field for the geometry — prove the representation first, without any AI call.
 
-- **`compound_port`** (extends `revb_model.Feature`, or a new `kind`): independent
-  `entry_axis` and `follow_on_axis`, each its own `{z, angle, tilt}` triple (reusing
-  `Numeric`), separate `entry_depth`/`drill_depth`/`thread_depth` instead of the current
-  single `entry_depth`, and an explicit `termination: Literal["blind","through","groove:<id>"]`
-  checked by `source_verification.py`'s connectivity handler. Optional conical envelope width
-  for a modelled taper, off by default (current tap-drill-only policy stays the default;
-  taper is opt-in per the review's caution against inventing NPT depths).
-- **Test**: hand-author a `DraftSpec` (no Gemini call, exactly the review's Milestone C) with
-  a `compound_port` matching the review's own 2H-66033 numbers (entry at 0.98 in from A,
-  follow-on at 1.06 in from A, 21° incline) and assert it builds, the two segments connect
-  without an unintended breakthrough, and `check_structure` measures both axes independently.
-- Fix the F6 live prompt contradiction now that it's cheap: `geometry_feedback` must not say
-  "keep the profile exactly as before" when one of the fed-back failures is the profile's own
-  axial length; branch the instruction on whether `"profile"` is in the failing ids.
-- Feed uncited-dimension and inventory-association checks into `construction_failures` (or a
-  sibling function) so they participate in the one repair round instead of only appearing
-  after `build_from_audit`'s tail — closing the other half of F6.
+**Status: compound_port, profile_compiler.py and the F6 prompt-contradiction fix all shipped
+(2026-09-17); feeding D-layer obligations into the repair round is still open (that is Milestone
+E / `repair_controller.py` territory now, not this milestone's remaining scope).**
+
+- **`compound_port`** — shipped, as a new `Feature.kind` rather than an extension of `port`'s
+  own fields. `PortSegment` (`revb_model.py`) carries its own `diameter`/`depth`/`z`/`angle`/
+  `tilt`/`thread`/`termination` (`Literal["thru", "blind", "meets_cavity"]`)/`target`; a
+  `compound_port` feature requires `host == "outside"` and `len(segments) >= 2` (a single axis
+  stays a plain `port`). `build_model` computes each segment's entry point independently via
+  the same `outer_radius_at` mechanism the single-port branch already used, cuts its own
+  cylinder, and fuses every segment's cutter into one `Compound` — not a chained/derived single
+  axis, and not limited to exactly two stages the way the review's `entry_axis`/`follow_on_axis`
+  sketch was. No conical taper envelope was added (still out of scope, per the review's own
+  caution against inventing NPT depths) and no `groove:<id>` connectivity termination exists yet
+  — `termination` distinguishes `thru`/`blind`/`meets_cavity` (an endpoint-in-void heuristic,
+  reusing the existing single-port H2 check) but can't yet name a specific target cavity by id;
+  `PortSegment.target` is reserved for that and currently unused by any checker.
+- **Test**: `test_a_reviewed_compound_port_spec_cuts_two_independently_angled_segments`
+  (`tests/test_revb_drawing_edges.py`) hand-authors a `DraftSpec` (no Gemini call) with a
+  two-segment compound port (15° and 20° tilt, independently z-positioned and thread-sized) and
+  asserts it builds, both segments' passages measure `PASS` through `check_structure`, and the
+  combined cutter leaves no residual material (`H1` check). It uses synthetic numbers tuned to
+  this repo's existing gland-ring test fixtures, **not** the review's own 2H-66033 case (entry at
+  0.98 in from A, follow-on at 1.06 in from A, 21° incline) — no `SourceContract` exists yet for
+  that sheet to author a same-numbers regression against; doing so is the natural next step
+  before trusting `compound_port` on that specific drawing.
+- **Not yet done, still open:** `spec_schema()` deliberately excludes `compound_port`/`segments`
+  from what's offered to the extraction provider (see the F5 row above) — `SPEC_PROMPT` doesn't
+  document the kind, and its `PortSegment` `$ref` alone pushed the flat schema past the ~5 KB
+  provider budget that already forced the flat (non-grouped) schema shape. Wiring extraction to
+  propose `compound_port` needs either a slimmer per-segment encoding or dropping something else
+  from the schema to make room, plus prompt text describing when to use it over a plain `port`.
+
+- **`profile_compiler.py`** — shipped. `ProfileSpan` (external/bore, `straight`/`shoulder`/
+  `groove`/`lead_in`) names each axial span; `compile_profile` resolves every span (diameter to
+  radius, `AxialPosition`'s `{datum, offset}` through a real `DatumRegistry` — see the F4 row
+  above), checks each surface's spans continue into the next with no gap or diameter mismatch,
+  walks them into the exact boundary polygon `build_model` already consumes, and returns
+  per-span `axial_band` checks plus the compiled overall length. That length is the external
+  chain's own front-to-back extent — an identified endpoint difference, replacing "the largest
+  printed linear dimension" entirely for any caller that adopts spans (the review's own
+  complaint: the shortcut can confuse a transverse width with axial length, or reject a valid
+  sum of adjacent spans; a compiled chain has no such ambiguity by construction). `build_model`
+  gained two new optional parameters to support this without touching its existing behaviour:
+  `points_override` (bypasses `spec.profile`/`Numeric` entirely — a compiled point has no
+  citation left to re-verify) and `body_checks` (measured against the plain revolved body
+  BEFORE any feature is cut; a `FAIL` there raises immediately, so a hole or port can never
+  adapt to, and silently mask, a wrong host body). Tests:
+  `tests/test_profile_compiler.py` (7 cases: compiled boundary and length, continuity/shape
+  validation, the datum-offset worked example, and body-before-features).
+  **Not yet done:** extraction still proposes a raw `ProfilePoint` polygon directly — nothing
+  wires `SPEC_PROMPT`/the build pipeline to propose spans instead, so the old "largest linear
+  dimension" fallback in `revb_proposal.axial_length_check` (`reliable_overall_length_mm`,
+  strengthened earlier this session) is still what the *actual* running pipeline uses today;
+  `profile_compiler.py` proves the replacement is buildable, not yet that it is used.
+- **Done:** the F6 live prompt contradiction (`revb_proposal.geometry_feedback`) — it branches
+  on whether `"profile"` is one of the failing ids and, when it is, tells the model to correct
+  the profile's vertices instead of the previous unconditional "keep the profile exactly as
+  before" (which directly contradicted asking it to fix a failure named as the profile's own).
+  Regression: `tests/test_revb_proposal.py`.
+- Still open, now Milestone E's `repair_controller.py` territory: feed uncited-dimension and
+  inventory-association checks into `construction_failures` (or a sibling function) so they
+  participate in the one repair round instead of only appearing after `build_from_audit`'s
+  tail — closing the other half of F6.
 
 ### Milestone D — Attach extraction to the same verifier, add the crop tool (P1, ~3 days)
 
@@ -218,21 +304,91 @@ checked against.
 
 ### Milestone E — Repair controller and fair model comparison (P1→P2, ~2–3 days + ongoing)
 
-- **New `repair_controller.py`**, replacing the ad-hoc logic currently inline in
-  `_construct_with_correction`: a small state machine (not a framework) owning the bounded
-  attempt budget (default 3, review's number, adjustable), the no-regression rule already
-  partially implemented (extend "dropped features" to "any previously-passing
-  `verify_contract` check regressing to FAIL or UNKNOWN"), and the stopping rule
-  (`repeated candidate hash` or `no progress` — `revb_proposal.py` already tracks proposal
-  hashes implicitly via `decode_proposal`; make the repeat check explicit).
-- Final-verification pass: after the winning draft is chosen, export once more, reimport
-  fresh, rerun `verify_contract` in full, and bind the report to that exact STEP's hash before
-  marking anything reviewable — never reuse an in-memory result from the winning attempt.
-- Model comparison harness: reuse `revb_accuracy.score_runs` plumbing, but point it at
-  `verify_contract` results instead of (or alongside) the diagnostic scoreboard, across
-  repeated runs per drawing per provider, logging actual provider/model version strings
-  (`PipelineConfig` already threads model names through — add version logging at the
-  `call_gemini` boundary).
+**Status: the core invariant-enforcing decision function shipped (2026-09-17); the true
+multi-round budgeted loop and targeted inspection tools are still open.**
+
+- **New `repair_controller.py`** — shipped: `evaluate_repair(previous_spec, previous_checks,
+  candidate_spec, candidate_checks) -> RepairOutcome` replaces the old "did it drop more than it
+  fixed" heuristic in `_construct_with_correction`. It rejects a candidate that (a) makes a
+  required feature disappear, become `report_only`, or reappear with different citations under
+  a new id (identity is tracked by `(kind, citations)`, not the id string, so a rename with the
+  same citations is still recognized as the same obligation — not evasion); (b) turns any
+  previously-passing `(layer, subject)` check into `FAIL`/`UNKNOWN`; or (c) is byte-identical to
+  the previous spec (`spec_hash`) or fixes nothing new. `_construct_with_correction` now calls it
+  directly (`revb_build_pipeline.py`), comparing `build_model`'s own checks plus a synthesized
+  axial-length check (`_augmented_checks`, since that one is computed separately from
+  `build_model`'s own output). Source-contract limits cannot loosen by construction elsewhere —
+  a `SourceContract` is loaded fresh from its immutable file on every `verify_contract` call, and
+  no repair round is ever given write access to it, so there is nothing for this module to
+  enforce there. **Acceptance test passes**:
+  `test_a_failed_required_port_demoted_to_report_only_is_rejected_not_promoted`
+  (`tests/test_revb_drawing_edges.py`) reproduces the review's own named loophole end to end
+  through the normal `build_from_audit` entrypoint — a port that fails to build, "fixed" by
+  marking it `report_only`, is rejected and the loudly-failing original draft is kept instead.
+  Unit coverage: `tests/test_repair_controller.py` (8 cases).
+- **Not yet done:** this is still a single bounded correction round (as `_construct_with_correction`
+  already was), not the true multi-round state machine with a configurable attempt budget the
+  sketch above describes — `spec_hash`-based repeat detection is real and wired in, but nothing
+  yet loops past one correction if it is rejected. Feeding D-layer obligations (uncited
+  dimensions, inventory coverage) into that one round, so they can trigger a correction instead
+  of only appearing in `build_from_audit`'s tail, is also still open (moved here from Milestone
+  C's F6 note — the prompt-contradiction half of F6 is fixed, this half is not).
+- Targeted inspection tools (contextual source crop, named drawing requirement, aligned CAD
+  section, actual STEP measurement) for the repair round: not started.
+- Model comparison harness (repeated runs per drawing per provider, `verify_contract`-driven):
+  not started — needs live provider access and real held-out drawings, not a code change alone.
+
+### PR4 — Exact-file final verification and the deliberately-wrong-part battery
+
+**Status: shipped (2026-09-17), except the two items that need a live server/real drawings.**
+
+- **New `final_verification.py`** — `freeze_release(step_path, checks, source_contract_path=)`
+  hashes the exact STEP bytes, the exact checks list, and the source contract (when one exists)
+  into one `ReleaseRecord`, and computes a `status` from four kept-separate values:
+  `valid_solid` is never actually reachable as a *returned* status today (a solid that failed to
+  round-trip is `blocked` instead, since nothing downstream of an invalid B-rep is worth
+  measuring) — `nominal_drawing_conformance` (every check passed), `unresolved_requirements`
+  (a valid solid, something UNKNOWN), or `blocked` (anything FAILed). `manufacturing_approval`
+  is a separate, always-`False`-by-default field this module never computes — approval is a
+  human decision, release status is a measurement, and conflating them was exactly the review's
+  own caution. `verify_release` recomputes every hash from the bytes actually about to be
+  delivered and raises if any of them disagree with the frozen record — never trusting the
+  record's own claim. `build_from_audit` now writes `release.json` into every model folder
+  (`revb_build_pipeline.py`), alongside the existing `checks.json`/`manifest.json`, with zero
+  change to the existing `"release": "BLOCKED"` manifest semantics. **Acceptance test passes**:
+  `test_verify_release_rejects_an_older_step_delivered_with_a_newer_report`
+  (`tests/test_final_verification.py`) reproduces the review's own scenario directly — the
+  same path rebuilt with different bytes, the older report rejected against the newer file.
+  `test_build_from_audit_freezes_a_release_record_matching_the_delivered_step`
+  (`tests/test_revb_drawing_edges.py`) proves the wiring through the real pipeline, not just
+  the module in isolation.
+- **Not yet done:** `/api/drawings/{job_id}/files/step` (`web_api.py`) does not call
+  `verify_release` before serving the STEP — `release.json` is written but nothing reads it
+  back at delivery time yet. This needs changes to a live-serving endpoint this session did not
+  have a way to integration-test against a running server, so it was left as a clearly-scoped
+  follow-up rather than an unverified change to the delivery path.
+- **New `tests/test_deliberately_wrong_parts.py`** — 5 of the review's 6 named deliberate
+  errors, each built as an internally-consistent (self-check-passing) candidate and caught only
+  by `verify_contract` against a small hand-authored `SourceContract`, exactly matching the
+  review's own framing: diameter used as radius (an 80 mm bore built where 40 mm was accepted);
+  an internal groove modeled on the external surface instead (bore stays flat, OD wrongly
+  stepped); a correct max diameter but a body 12 mm short of its accepted 30 mm length (caught
+  by `_axial_band`'s own "expected axial interval extends beyond the model" — no new logic
+  needed); an external locating boss replaced by an internal counterbore (OD stays flat, bore
+  wrongly enlarged); and a hole drilled from the wrong face (built successfully, at the wrong
+  end of the part, so the hole-pattern search window over its accepted z-span finds nothing).
+  The sixth (required port demoted to `report_only`) was already covered by
+  `repair_controller`'s own acceptance test in Milestone E, so it is not duplicated here. A
+  sixth, correct-candidate test confirms all of the above pass together when actually built
+  right — the verifier discriminates rather than blocking everything.
+- **Not yet done, and not safely doable as a code change alone:** "test held-out drawings and
+  repeated runs before claiming broader accuracy" — this needs live provider access and real
+  drawings this session's synthetic fixtures cannot substitute for; the five real sheets already
+  tested this session (GEBK472722A, 2H-183624, 1H-141756, 2H-66033, 1H-139899) have no
+  hand-authored `SourceContract` yet, so `verify_contract`'s SRC-layer checks have never actually
+  run against a real drawing, only against synthetic fixtures throughout PR1–PR4. Authoring one
+  contract for a real sheet end to end remains the single most convincing next step before any
+  claim of broader accuracy.
 
 ## 3. File-level backlog (supersedes the review's table with current paths)
 
@@ -243,12 +399,15 @@ checked against.
 | P0 | new `source_contract.py` | `ContractDimension`/`ContractFeature`/`SourceContract`, immutable, hash-bound. |
 | P0 | new `source_verification.py` (wraps `revb_geometry.py`) | `verify_contract`; generalizes `_axial_band`; adds shoulder/groove/connectivity handlers. |
 | P0 | new `tests/test_source_verification.py` | The 40→80 mm bore probe and the full mutation battery, all as automatic regressions. |
-| P1 | `revb_model.py` | `compound_port`: independent entry/follow-on axes, split depth semantics, explicit termination. |
-| P1 | `revb_proposal.py` | Fix the profile-repair prompt contradiction; feed D-layer obligations into the repair round; crop-aware `Requester` variant. |
+| P1 | `revb_model.py` | Done: `compound_port`/`PortSegment`, N independent segments fused into one cutter, explicit per-segment termination. Not offered to the extraction provider yet (schema budget; `SPEC_PROMPT` undocumented). |
+| P1 | new `profile_compiler.py` | Done: `ProfileSpan`/`AxialPosition`/`compile_profile`. Not wired to extraction; `axial_length_check`'s "largest printed dimension" fallback is still what the running pipeline uses. |
+| P1 | `revb_proposal.py` | Done: profile-repair prompt contradiction fixed. Still open: feed D-layer obligations into the repair round; crop-aware `Requester` variant. |
 | P1 | `revb_sections.py` | Feature-aligned inspection planes; separate topology from metric conformance. |
 | P1 | `revb_accuracy.py` | Add a `SourceContract`-driven conformance mode alongside the existing diagnostic scoreboard (kept, unchanged) — do not blend the two. |
-| P1→P2 | new `repair_controller.py` | Attempt budget, strict no-regression against `verify_contract`, repeat-hash stop, final fresh-import re-verification. |
-| P2 | `web_api.py`, review UI | Show integrity / source conformance / unresolved obligations / review state as separate fields, bound to the delivered STEP hash. |
+| P1→P2 | new `repair_controller.py` | Done: `evaluate_repair` (no-evasion, no-regression, repeat-hash, no-progress). Still open: true multi-round attempt budget. |
+| P1→P2 | new `final_verification.py` | Done: `freeze_release`/`verify_release`/`ReleaseRecord` (4-way status, hash-bound STEP+checks+contract). Wired into `build_from_audit` (writes `release.json`). Not yet wired into `web_api.py`'s own file-serving endpoint. |
+| P1→P2 | new `tests/test_deliberately_wrong_parts.py` | Done: 5 of the review's 6 named deliberate errors (report_only rejection was already covered in `repair_controller`'s own test) plus one correct-candidate-passes case. |
+| P2 | `web_api.py`, review UI | Show integrity / source conformance / unresolved obligations / review state as separate fields, bound to the delivered STEP hash. `/api/drawings/{job_id}/files/step` does not yet call `verify_release` before serving. |
 
 ## 4. Acceptance measures (unchanged from the review — restated as what to log)
 

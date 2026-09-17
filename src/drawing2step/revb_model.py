@@ -26,6 +26,10 @@ CAPABILITIES = {
     "hole_pattern": "axial cylindrical holes, blind or through",
     "tapped_hole": "tap-drill geometry with thread annotation",
     "port": "radial/oblique cylindrical drill; optional thread entry drill",
+    "compound_port": (
+        "two or more independently-angled/positioned radial drill stages fused into one "
+        "cutter, for ports whose bottom-drill and thread stages do not share one axis"
+    ),
     "bore_slot": "axial cylindrical bore notch",
     "od_slot": "open axial slot from a pitch circle out through the outside diameter",
     "chamfer": "specified circular edge, width and angle",
@@ -133,12 +137,45 @@ class ProfilePoint(Contract):
     radius: Numeric
 
 
+class PortSegment(Contract):
+    """One independently-oriented stage of a compound port.
+
+    A compound port's stages do not share one axis: a shallow bottom/pilot drill and the NPT
+    thread it leads to can be cut at different angles from different, independently-cited
+    positions. Each segment is its own cylinder, cut from the body's outer surface along its
+    own direction; the feature's cut is the union of its segments, never one shared origin and
+    direction with only the diameter changing partway (that is what a plain `port` already
+    represents, and remains the right kind whenever one axis is actually correct).
+    """
+
+    diameter: Numeric | None = None
+    depth: Numeric | None = None
+    z: Numeric
+    angle: Numeric
+    tilt: Numeric | None = None
+    thread: str | None = None
+    termination: Literal["thru", "blind", "meets_cavity"] = "meets_cavity"
+    target: str = ""
+
+    @model_validator(mode="after")
+    def has_a_diameter(self) -> Self:
+        if self.diameter is None and not self.thread:
+            raise ValueError("Each port segment requires a diameter or a supported thread")
+        if self.depth is None and self.termination != "meets_cavity":
+            raise ValueError(
+                "A thru/blind segment requires a cited depth; only meets_cavity may leave "
+                "depth to be measured from the built geometry"
+            )
+        return self
+
+
 class Feature(Contract):
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
     kind: Literal[
         "hole_pattern",
         "tapped_hole",
         "port",
+        "compound_port",
         "bore_slot",
         "od_slot",
         "chamfer",
@@ -159,9 +196,11 @@ class Feature(Contract):
     radius: Numeric | None = None
     entry_depth: Numeric | None = None
     entry_diameter: Numeric | None = None
+    segments: list[PortSegment] = Field(default_factory=list)
     host: Literal["face_a", "face_b", "outside", "bore"]
     reference_face: str = Field(min_length=1)
     thread: str | None = None
+    termination: Literal["thru", "blind", "meets_cavity"] = "meets_cavity"
     report_only: bool = False
     reason: str = ""
 
@@ -174,7 +213,8 @@ class Feature(Contract):
         fields = {
             "hole_pattern": ("diameter", "depth", "pcd", "count", "angle"),
             "tapped_hole": ("depth", "pcd", "count", "angle"),
-            "port": ("diameter", "depth", "z", "angle"),
+            "port": ("diameter", "z", "angle"),
+            "compound_port": (),
             "bore_slot": ("diameter", "radius", "z", "depth", "angle"),
             "od_slot": ("diameter", "depth", "pcd", "count", "angle"),
             "chamfer": ("z", "radius", "width", "angle"),
@@ -183,12 +223,25 @@ class Feature(Contract):
         for name in fields[self.kind]:
             if getattr(self, name) is None:
                 raise ValueError(f"{self.id}: {self.kind} requires {name}")
+        if self.kind == "port" and self.depth is None and self.termination != "meets_cavity":
+            raise ValueError(
+                f"{self.id}: a thru/blind port requires a cited depth; only meets_cavity "
+                "may leave depth to be measured from the built geometry"
+            )
         if self.kind == "port" and self.count is not None:
             raise ValueError("Represent every radial port separately, each with its own position")
         if self.kind == "tapped_hole" and not self.thread:
             raise ValueError("Tapped hole requires a supported thread designation")
         if self.kind == "port" and self.thread and self.entry_depth is None:
             raise ValueError("Threaded port requires cited or assumed entry_depth")
+        if self.kind == "compound_port":
+            if self.host != "outside":
+                raise ValueError(f"{self.id}: compound_port requires outside host")
+            if len(self.segments) < 2:
+                raise ValueError(
+                    f"{self.id}: compound_port requires at least two linked segments; "
+                    "a single axis is a plain port"
+                )
         if self.kind == "counterbore":
             if self.host == "outside" and self.z is None:
                 raise ValueError(f"{self.id}: a spotface at a port entry requires z")
@@ -263,10 +316,22 @@ def enrich_ledger(requirements: list[Requirement], drawing_unit: str) -> list[Re
         if r.kind == "note" and not r.geometry_driving:
             continue
         text = r.raw_text
-        # A numeric-numeric thread designation ('#10-24', '#8-32') and a degree-minutes angle
-        # ('22°30\'') both contain plain numbers that are never lengths on their own; each is
-        # handled as one whole unit below, so every number inside these spans is skipped here.
-        non_length_spans = [m.span() for m in re.finditer(r"#\d+-\d+", text)]
+        # A thread designation and a degree-minutes angle both contain plain numbers that are
+        # never lengths on their own; each is handled as one whole unit below, so every number
+        # inside these spans is skipped here. Covers numbered (#10-24), unified fractional
+        # (5/16-18 UNC, 3/4-16 UNF-2A) and NPT pipe threads written as a fraction or a decimal
+        # (1/2 NPT, 1/2-14 NPT, .500 NPT) — a bare fraction with no thread marker is left alone,
+        # since nothing here says it isn't a genuine length written as a fraction.
+        non_length_spans = [
+            m.span()
+            for m in re.finditer(
+                r"#\d+-\d+"
+                r"|\d+/\d+(?:-\d+)?\s*(?:UN[CF]?(?:-[123][AB])?|NPTF?)\b"
+                r"|\.\d+\s*NPTF?\b",
+                text,
+                re.I,
+            )
+        ]
         dms_matches = list(re.finditer(r"(\d+)°\s*(\d+)[′']", text))
         non_length_spans.extend(m.span() for m in dms_matches)
         for index, match in enumerate(
@@ -365,6 +430,76 @@ def outer_radius_at(points: list[tuple[float, float]], z: float) -> float | None
     return max(radii) if radii else None
 
 
+def _ray_exit_depth(
+    solid: cq.Solid, point: cq.Vector, direction: cq.Vector, max_depth: float, steps: int
+) -> float | None:
+    """Distance from ``point`` to the first inside-to-outside crossing, or None if none found.
+
+    A coarse scan finds the bracket, then bisection refines it: a ray through a thin body can
+    re-enter material past the near cavity (the far wall), so this returns the *first* crossing
+    rather than trusting the state at ``max_depth`` alone.
+    """
+    step = max_depth / steps
+    lo = 0.0
+    for i in range(1, steps + 1):
+        hi = i * step
+        if not solid.isInside(point + direction * hi):
+            while hi - lo > 1e-3:
+                mid = (lo + hi) / 2
+                if solid.isInside(point + direction * mid):
+                    lo = mid
+                else:
+                    hi = mid
+            return hi
+        lo = hi
+    return None
+
+
+def cavity_depth(
+    solid: cq.Solid,
+    start: cq.Vector,
+    direction: cq.Vector,
+    radius: float,
+    max_depth: float,
+    steps: int = 200,
+    rim_samples: int = 12,
+) -> float:
+    """Shortest drill length whose *entire* circular cross-section clears into open space.
+
+    A "meets_cavity" port's depth is not a printed number — the drawing states a destination
+    ("TO MEET GROOVE", "DRILL THRU' AS SHOWN"), not a length, precisely because the length is
+    already determined by geometry the model already has (wall thickness at that position). An
+    AI-authored numeric assumption for this value has no printed dimension to anchor it and, in
+    practice, has been observed substituting an unrelated figure (a thread-engagement length)
+    for the actual drill travel; this measures the real solid instead of asking for a guess.
+
+    A drill meeting a curved cavity (a bore) clears at its centre before its rim does — the
+    concave wall curves away from a flat-ended cylinder, so a centerline-only measurement would
+    under-count by the corridor's own sagitta and leave the reported depth still resting on a
+    sliver of material at the drill's edge. This samples the centerline plus points around the
+    drill's rim and returns the deepest of them, so the whole cross-section is accounted for.
+    """
+    if not solid.isInside(start):
+        raise ValueError("Port entry point is not inside the host material")
+    reference = cq.Vector(0, 0, 1) if abs(direction.z) < 0.9 else cq.Vector(1, 0, 0)
+    u = direction.cross(reference).normalized()
+    v = direction.cross(u).normalized()
+    offsets = [cq.Vector(0, 0, 0)] + [
+        (u.multiply(math.cos(theta)) + v.multiply(math.sin(theta))).multiply(radius)
+        for theta in (2 * math.pi * k / rim_samples for k in range(rim_samples))
+    ]
+    depths: list[float] = []
+    for offset in offsets:
+        depth = _ray_exit_depth(solid, start + offset, direction, max_depth, steps)
+        if depth is None:
+            raise ValueError(
+                "No cavity found along the port direction within the modelling bounds; "
+                "confirm the port's angle and tilt point toward the intended internal feature"
+            )
+        depths.append(depth)
+    return max(depths)
+
+
 def entry_face_z(
     plain: cq.Shape, points: list[tuple[float, float]], host: str, pitch: float, radius: float
 ) -> float:
@@ -393,8 +528,27 @@ def entry_face_z(
     return max(exposed) if host == "face_b" else min(exposed)
 
 
-def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) -> dict[str, Any]:
-    """Construct a draft, naming failed cuts and preserving the last valid solid."""
+def build_model(
+    spec: DraftSpec,
+    requirements: list[Requirement],
+    outdir: Path,
+    body_checks: list[dict[str, Any]] | None = None,
+    points_override: list[tuple[float, float]] | None = None,
+) -> dict[str, Any]:
+    """Construct a draft, naming failed cuts and preserving the last valid solid.
+
+    ``body_checks`` (from ``profile_compiler.compile_profile``, when the caller has one) are
+    measured against the plain revolved body BEFORE any feature is cut. A wrong host body is
+    reported and construction stops there — a hole or port entering a wrong body just adapts
+    to its mistake (a different entry face, a different corridor length) instead of surfacing
+    it, so features must never be given the chance to paper over a bad body.
+
+    ``points_override`` (also from ``compile_profile``) replaces ``spec.profile`` for the
+    polygon itself: a compiler's already-resolved (radius, z) points have no citation to
+    re-verify through ``Numeric``'s restricted-expression evaluator, and none of its provenance
+    variants represent "an already-derived, non-uncertain float" — ``spec.profile`` is still
+    required by the schema in this case but is never read.
+    """
     outdir.mkdir(parents=True, exist_ok=True)
     ledger = {r.id: r for r in requirements}
     assumptions = {a.id: a for a in spec.assumptions}
@@ -404,13 +558,17 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
     write_once(
         outdir / "ledger.json", canonical_json([r.model_dump(mode="json") for r in requirements])
     )
-    points = [
-        (
-            numeric_value(p.radius, ledger, assumptions, "length"),
-            numeric_value(p.z, ledger, assumptions, "length"),
-        )
-        for p in spec.profile
-    ]
+    points = (
+        list(points_override)
+        if points_override is not None
+        else [
+            (
+                numeric_value(p.radius, ledger, assumptions, "length"),
+                numeric_value(p.z, ledger, assumptions, "length"),
+            )
+            for p in spec.profile
+        ]
+    )
     if points[0] == points[-1]:
         points.pop()
     if any(r <= 0 or z < 0 for r, z in points) or len(set(points)) != len(points):
@@ -421,8 +579,16 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
     if not isinstance(shape, cq.Shape) or not shape.isValid() or len(shape.Solids()) != 1:
         raise ValueError("body: profile did not produce exactly one valid solid")
     plain = shape
-    cq.exporters.export(plain, str(outdir / "plain-body.step"))
+    plain_path = outdir / "plain-body.step"
+    cq.exporters.export(plain, str(plain_path))
     checks: list[dict[str, Any]] = []
+    if body_checks:
+        body_results = check_structure(plain_path, body_checks)
+        checks.extend(body_results)
+        failed = [c for c in body_results if c["status"] == "FAIL"]
+        if failed:
+            detail = "; ".join(f"{c['subject']}: {c['detail']}" for c in failed)
+            raise ValueError(f"body: host body fails independent span verification: {detail}")
     receipts: list[dict[str, Any]] = []
     expectations: list[dict[str, Any]] = []
     cutters: dict[str, cq.Shape] = {}
@@ -538,10 +704,10 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
             elif f.kind == "port":
                 if f.host != "outside":
                     raise ValueError("Port requires outside host")
-                depth, angle, z = value("depth"), value("angle", "degree"), value("z")
+                angle, z = value("angle", "degree"), value("z")
                 tilt = value("tilt", "degree") if f.tilt else 0
-                if not 0 < diameter < outer or not 0 < depth < 2 * outer or abs(tilt) >= 80:
-                    raise ValueError("Invalid port diameter, depth or tilt")
+                if not 0 < diameter < outer or abs(tilt) >= 80:
+                    raise ValueError("Invalid port diameter or tilt")
                 theta, phi = math.radians(angle), math.radians(tilt)
                 direction = cq.Vector(
                     -math.cos(theta) * math.cos(phi),
@@ -555,6 +721,22 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
                 start = cq.Vector(entry_radius * math.cos(theta), entry_radius * math.sin(theta), z)
                 if not plain.Solids()[0].isInside(start + direction * 0.01):
                     raise ValueError("Port host absent at this axial position")
+                depth_measured = f.depth is None or f.termination == "meets_cavity"
+                if depth_measured:
+                    # "TO MEET GROOVE"/"AS SHOWN" specifies a destination, not a length: even
+                    # when the model also cites a nominal printed number, that number is a
+                    # rough drawing reference and is not trustworthy as the exact drill length
+                    # (see 2H-183624's ports, where a genuinely distinct printed "drill depth"
+                    # still undershot the real cavity). The length is already fixed by the
+                    # body's own wall thickness along this exact ray, so measure it instead of
+                    # trusting any guess (see `cavity_depth`'s own docstring for why).
+                    depth = cavity_depth(
+                        plain.Solids()[0], start, direction, diameter / 2, 2 * outer
+                    )
+                else:
+                    depth = value("depth")
+                if not 0 < depth < 2 * outer:
+                    raise ValueError("Invalid port depth")
                 cut = cq.Solid.makeCylinder(
                     diameter / 2, depth + 0.002, start - direction * 0.001, direction
                 )
@@ -568,9 +750,18 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
                             "flat/tap drill) or a supported thread table entry, plus entry_depth"
                         )
                     entry_depth = value("entry_depth")
-                    # A bottomed tap drill with no follow-on (entry_depth == depth) is a
-                    # legitimate blind port; only an entry deeper than the drill is impossible.
-                    if not 0 < entry_depth <= depth:
+                    # When depth is a measured cavity_depth for the narrower follow-on drill,
+                    # it is not the right upper bound for a wider entry drill: the entry drill's
+                    # own (larger) radius needs its own, larger sagitta allowance to actually
+                    # bottom out. Measure that instead of reusing the follow-on's figure, so a
+                    # legitimately bottomed entry (entry_depth meeting or exceeding it) is not
+                    # mistaken for bad data, while a citation deeper than even that is still one.
+                    depth_limit = (
+                        cavity_depth(plain.Solids()[0], start, direction, entry / 2, 2 * outer)
+                        if depth_measured
+                        else depth
+                    )
+                    if not 0 < entry_depth <= depth_limit + 1e-6:
                         raise ValueError("Thread entry depth must be inside full drill path")
                     if not diameter < entry < outer:
                         raise ValueError(
@@ -583,8 +774,23 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
                             entry / 2, depth + 0.002, start - direction * 0.001, direction
                         )
                     else:
-                        cut = cut.fuse(
-                            cq.Solid.makeCylinder(entry / 2, entry_depth + 0.001, start, direction)
+                        # Sequential cuts, not a pre-fused tool: a single boolean cut with a
+                        # fused/compound tool can silently remove nothing on some bodies (see
+                        # the same note below, at the shared cut loop). This wide entry
+                        # cylinder also cuts the body a second time, after the narrower
+                        # passage above already opened the same coaxial hole; the usual 1
+                        # micron clearance used elsewhere in this file is not enough margin
+                        # for OCCT to reliably tell the wide cut's cap apart from that
+                        # existing hole's own boundary, so this one needs a coarser offset.
+                        clearance = 0.01
+                        parts.append(cut)
+                        parts.append(
+                            cq.Solid.makeCylinder(
+                                entry / 2,
+                                entry_depth + 2 * clearance,
+                                start - direction * clearance,
+                                direction,
+                            )
                         )
                 endpoint = start + direction * (depth + 0.01)
                 expectations.append(
@@ -612,6 +818,108 @@ def build_model(spec: DraftSpec, requirements: list[Requirement], outdir: Path) 
                             "Drill endpoint is void; intended cavity identity requires review",
                         )
                     )
+            elif f.kind == "compound_port":
+                if f.host != "outside":
+                    raise ValueError("Compound port requires outside host")
+                for i, seg in enumerate(f.segments):
+                    seg_diameter = (
+                        numeric_value(seg.diameter, ledger, assumptions, "length")
+                        if seg.diameter is not None
+                        else None
+                    )
+                    if seg_diameter is None:
+                        assert seg.thread is not None  # enforced by PortSegment.has_a_diameter
+                        drill = thread_drill_mm(seg.thread)
+                        if drill is None:
+                            raise ValueError(
+                                f"{f.id}: segment {i} has unsupported thread designation "
+                                f"{seg.thread!r}; cite the printed tap-drill diameter or "
+                                "register an assumption"
+                            )
+                        seg_diameter = drill
+                    seg_z = numeric_value(seg.z, ledger, assumptions, "length")
+                    seg_angle = numeric_value(seg.angle, ledger, assumptions, "degree")
+                    seg_tilt = (
+                        numeric_value(seg.tilt, ledger, assumptions, "degree")
+                        if seg.tilt is not None
+                        else 0.0
+                    )
+                    if not 0 < seg_diameter < outer or abs(seg_tilt) >= 80:
+                        raise ValueError(f"{f.id}: segment {i} has invalid diameter or tilt")
+                    theta, phi = math.radians(seg_angle), math.radians(seg_tilt)
+                    direction = cq.Vector(
+                        -math.cos(theta) * math.cos(phi),
+                        -math.sin(theta) * math.cos(phi),
+                        math.sin(phi),
+                    )
+                    entry_radius = outer_radius_at(points, seg_z)
+                    if entry_radius is None:
+                        raise ValueError(f"{f.id}: segment {i} host absent at this axial position")
+                    start = cq.Vector(
+                        entry_radius * math.cos(theta), entry_radius * math.sin(theta), seg_z
+                    )
+                    if not plain.Solids()[0].isInside(start + direction * 0.01):
+                        raise ValueError(f"{f.id}: segment {i} host absent at this axial position")
+                    if seg.depth is not None and seg.termination != "meets_cavity":
+                        seg_depth = numeric_value(seg.depth, ledger, assumptions, "length")
+                    else:
+                        seg_depth = cavity_depth(
+                            plain.Solids()[0], start, direction, seg_diameter / 2, 2 * outer
+                        )
+                    if not 0 < seg_depth < 2 * outer:
+                        raise ValueError(f"{f.id}: segment {i} has invalid depth")
+                    seg_cut = cq.Solid.makeCylinder(
+                        seg_diameter / 2, seg_depth + 0.002, start - direction * 0.001, direction
+                    )
+                    parts.append(seg_cut)
+                    endpoint = start + direction * (seg_depth + 0.01)
+                    expectations.append(
+                        {
+                            "kind": "passage",
+                            "id": f"{f.id}_seg{i}",
+                            "start": list(start.toTuple()),
+                            "end": list((start + direction * seg_depth).toTuple()),
+                            "diameter": seg_diameter,
+                        }
+                    )
+                    if seg.termination == "blind":
+                        if not plain.Solids()[0].isInside(endpoint):
+                            raise ValueError(
+                                f"{f.id}: segment {i} declared blind but its endpoint is void"
+                            )
+                    elif seg.termination == "meets_cavity":
+                        if plain.Solids()[0].isInside(endpoint):
+                            checks.append(
+                                _check(
+                                    "H2",
+                                    f"{f.id}_seg{i}",
+                                    "FAIL",
+                                    "Drill stops in material before its intended cavity",
+                                )
+                            )
+                        else:
+                            checks.append(
+                                _check(
+                                    "H2",
+                                    f"{f.id}_seg{i}",
+                                    "UNKNOWN",
+                                    "Drill endpoint is void; intended cavity identity requires "
+                                    "review",
+                                )
+                            )
+                    # "thru" makes no local claim about the endpoint; a later segment or the
+                    # bore supplies where it actually goes.
+                    if seg.thread:
+                        checks.append(
+                            _check(
+                                "H1",
+                                f"{f.id}_seg{i}_thread",
+                                "UNKNOWN",
+                                "Tap-drill cylinder only. Thread depth, engagement and "
+                                "tapered/helical geometry are report-only under draft policy",
+                            )
+                        )
+                cut = cq.Compound.makeCompound(parts)
             elif f.kind == "od_slot":
                 count = value("count", "count")
                 if count != int(count) or not 1 <= count <= 200:

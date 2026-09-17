@@ -30,10 +30,15 @@ as '#10-24', '5/16-18 UNC', 'M8'); port for EACH radial passage including follow
 threads), bore_slot for axial round notch,
 chamfer for an unambiguous circular edge; marking is report_only, never fabricate a cut.
 Holes require diameter(or tapped thread), count, pcd, angle, depth and face_a/face_b host.
-Port requires diameter (FOLLOW-ON drill), z at OD entry, angle aroundZ, depth alongdrillaxis,
-optional tilt signed relative to inward radial direction (positive moves toward+Z).
-Threaded port also requires entry_depth. Do not invent NPT depth: register an assumption
-when AS SHOWN or unquantified. Ensure follow-on drill reaches intended bore/groove.
+Port requires diameter (FOLLOW-ON drill), z at OD entry, angle aroundZ, optional tilt signed
+relative to inward radial direction (positive moves toward+Z). Cite depth ONLY for a true
+blind drill with no internal destination; leave depth null whenever the note names a
+destination ('TO MEET GROOVE', 'TO MEET BORE', 'AS SHOWN', or any drill that continues into
+a modeled internal feature) even if a nominal length is also printed nearby, since that
+number is a rough drawing reference, not the exact travel, and the builder measures the real
+depth from the built geometry once depth is left null. Threaded port also requires
+entry_depth. Do not invent NPT depth: register an assumption when AS SHOWN or unquantified.
+Ensure follow-on drill reaches intended bore/groove.
 Bore_slot requires diameter=2*radius of tool (use citation+samecitation), radius for cutter
 center distance from Z axis, z and depth and angular position. Register unclear length.
 Chamfer requires circular edge z/radius, width, angle. If already in profile don't duplicate.
@@ -66,8 +71,9 @@ The outer envelope must agree with the context's printed overall dimension, and 
 axial extent (max z) must equal the context's overall_length_value exactly.
 Put every feature in the features array with its kind. REQUIRED fields per kind:
 hole_pattern: diameter, depth, pcd, count, angle; tapped_hole: thread, depth, pcd, count,
-angle (omit diameter); port: diameter, depth, z, angle, optional tilt, thread, entry_depth,
-entry_diameter; bore_slot: diameter, radius, z, depth, angle; od_slot: diameter, depth, pcd,
+angle (omit diameter); port: diameter, z, angle, depth (null if meeting an internal
+destination), optional tilt, thread, entry_depth, entry_diameter; bore_slot: diameter,
+radius, z, depth, angle; od_slot: diameter, depth, pcd,
 count, angle; chamfer: z, radius, width, angle; counterbore: diameter, depth, angle plus
 pcd and count (axial, host face_a/face_b) or z (spotface at a radial port entry, host
 outside, with the port's tilt); marking: reason only. Leave fields that do
@@ -118,6 +124,14 @@ Tapped holes: depth is the TAP DRILL depth, never the tap depth ('DRILL .67 DEEP
 means depth .67; 'TAP DRILL TO .75 DEEP THEN 5/16-18 TAP TO .50' means depth .75).
 A count on a port note ('2X .500 NPT') means that many SEPARATE port features, each with
 its own angle read from the plan view; never one port carrying a count.
+A hole_pattern/tapped_hole/od_slot angle is the position of ONE hole in THAT pattern (same
+diameter/thread, count and pcd), read from that pattern's OWN leader or centreline note.
+Never reuse an angle printed for a different pattern or for a port, and never default to a
+bare cardinal (0/90/180/270) just because the exact start is hard to read: check whether the
+pattern is drawn straddling a centreline (first hole offset by half its own angular pitch,
+180/count, from that centreline) rather than starting on it. When no leader or note fixes the
+start and the plan view is genuinely ambiguous, register an assumption naming the AS SHOWN
+position instead of asserting an unsupported exact or cardinal value.
 Every printed chamfer ('1.6 X 45°', '15°', 'C1', '1.6 TYP 4 PLACES') must appear: as a
 chamfer feature (z and radius of the circular edge it breaks, taken from the profile vertex,
 width, angle; one feature per edge) or as a slanted profile edge; register an assumption
@@ -190,6 +204,13 @@ def spec_schema() -> dict[str, Any]:
     # Keep the provider schema compact: per-kind groups or unions exceed this API's limits.
     # Feature.required_geometry enforces kind-specific requirements before any CAD operation.
     result["$defs"]["Feature"]["properties"].pop("length", None)
+    # compound_port is buildable (build_model/Feature) but not yet proposable: the prompt
+    # doesn't document it, and its segments $ref would blow the provider's schema budget.
+    # Drop it here rather than half-expose a kind the model has no instructions for.
+    result["$defs"]["Feature"]["properties"].pop("segments", None)
+    kind = result["$defs"]["Feature"]["properties"]["kind"]
+    kind["enum"] = [k for k in kind["enum"] if k != "compound_port"]
+    result["$defs"].pop("PortSegment", None)
     return result
 
 
@@ -658,9 +679,19 @@ def construction_failures(
     return failures
 
 
-def geometry_feedback(spec: DraftSpec, failures: list[tuple[str, str]]) -> str:
-    """Prompt suffix for the single bounded correction round after a failed construction."""
-    previous = json.dumps(spec.model_dump(mode="json", exclude_none=True), separators=(",", ":"))
+def _geometry_section(spec: DraftSpec, failures: list[tuple[str, str]]) -> str:
+    profile_failed = any(feature == "profile" for feature, _ in failures)
+    # "profile" is inserted by construction_failures when the body's OWN axial length is
+    # wrong; telling the model to keep that same profile "exactly as before" directly
+    # contradicts asking it to fix the failure named right above the instruction.
+    profile_instruction = (
+        "The profile itself is named above as failing: correct its vertices (and only the "
+        "profile) so the body's overall axial extent and stepped diameters match the drawing; "
+        "leave every feature and assumption exactly as before."
+        if profile_failed
+        else "Keep every other feature, the profile and the assumptions exactly as before and "
+        "do not remove features."
+    )
     return (
         "\nGEOMETRY CHECK: constructing the previous proposal (below) failed for these "
         "features (or its profile):\n"
@@ -671,8 +702,49 @@ def geometry_feedback(spec: DraftSpec, failures: list[tuple[str, str]]) -> str:
         "exposed annular face whose radial extent contains its pitch radius at that z (a bore "
         "step or a flange face, cited by the axial dimension of that face); a threaded port's "
         "entry_depth is the printed tap-drill depth and may equal but never exceed depth. "
-        "Keep every other feature, the profile and the assumptions exactly as before and do "
-        "not remove features. If the printed evidence cannot place a feature, move it to "
-        "unresolved with the reason.\nPREVIOUS PROPOSAL (internal form; answer in the WIRE "
-        "FORMAT):\n" + previous
+        + profile_instruction
+        + " If the printed evidence cannot place a feature, move it to unresolved with the reason."
+    )
+
+
+def _coverage_section(dropped: list[tuple[str, list[dict[str, Any]]]]) -> str:
+    lines = []
+    for _group, items in dropped:
+        kind = next((i["type"] for i in items if i.get("type")), "feature")
+        description = next((i["description"] for i in items if i.get("description")), "")
+        ids = ", ".join(sorted(i["id"] for i in items))
+        lines.append(f"- {kind} ({ids}): {description}")
+    return (
+        "\nCOVERAGE CHECK: an independent inventory pass found these physical features on the "
+        "drawing that the previous proposal never built at all (not mis-measured — absent):\n"
+        + "\n".join(lines)
+        + "\nAdd a feature for each one, citing its own printed dimensions and geometry. If the "
+        "printed evidence genuinely cannot place one, add it as report_only with an explicit "
+        "reason instead of leaving it out entirely. Do not remove or alter any feature not "
+        "named in this section or the geometry check above."
+    )
+
+
+def geometry_feedback(
+    spec: DraftSpec,
+    failures: list[tuple[str, str]],
+    dropped: list[tuple[str, list[dict[str, Any]]]] | None = None,
+) -> str:
+    """Prompt suffix for the single bounded correction round after a failed construction.
+
+    ``failures`` names features (or the profile) that were built but measured wrong; ``dropped``
+    names physical features an independent inventory pass found that the proposal never
+    attempted at all. Either or both may be given; the previous proposal is echoed once at the
+    end regardless, since a corrected answer must still be a complete draft.
+    """
+    previous = json.dumps(spec.model_dump(mode="json", exclude_none=True), separators=(",", ":"))
+    sections = ""
+    if failures:
+        sections += _geometry_section(spec, failures)
+    if dropped:
+        sections += _coverage_section(dropped)
+    return (
+        sections
+        + "\nPREVIOUS PROPOSAL (internal form; answer in the WIRE FORMAT):\n"
+        + previous
     )

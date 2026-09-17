@@ -84,9 +84,15 @@ def _section_radii(shape: cq.Shape, z: float, tolerance: float) -> list[float]:
 
 
 def _axial_band(shape: cq.Shape, e: dict[str, Any], tol: float) -> tuple[str, str]:
-    z0, z1, od = (_number(e[key]) for key in ("z0", "z1", "od"))
+    z0, z1 = (_number(e[key]) for key in ("z0", "z1"))
+    od = _number(e["od"]) if "od" in e else None
     bore = _number(e["idiameter"]) if "idiameter" in e else None
-    if not (z1 > z0 and od > 0 and (bore is None or od > bore >= 0)):
+    if od is None and bore is None:
+        raise ValueError("Axial band expectation requires od, idiameter, or both")
+    valid = z1 > z0 and (od is None or od > 0) and (bore is None or bore >= 0)
+    if valid and od is not None and bore is not None:
+        valid = od > bore
+    if not valid:
         raise ValueError("Invalid section expectation")
     box = shape.BoundingBox()
     if z0 < box.zmin - tol or z1 > box.zmax + tol:
@@ -106,9 +112,13 @@ def _axial_band(shape: cq.Shape, e: dict[str, Any], tol: float) -> tuple[str, st
             return "UNKNOWN", f"Circular section unresolved at z={z:g} mm"
         actual_od = max(radii) * 2
         actual_id = min(radii) * 2 if len(radii) > 1 else 0.0
-        if abs(actual_od - od) > tol or (bore is not None and abs(actual_id - bore) > tol):
+        od_fails = od is not None and abs(actual_od - od) > tol
+        bore_fails = bore is not None and abs(actual_id - bore) > tol
+        if od_fails or bore_fails:
+            expected_od = f"{od:g}" if od is not None else "?"
+            expected_bore = f"{bore:g}" if bore is not None else "?"
             return "FAIL", (
-                f"At z={z:g} mm expected OD/bore {od:g}/{bore}, "
+                f"At z={z:g} mm expected OD/bore {expected_od}/{expected_bore}, "
                 f"measured {actual_od:g}/{actual_id:g} mm"
             )
     return "PASS", "All actual axial face intervals match the expected outer and bore diameters"

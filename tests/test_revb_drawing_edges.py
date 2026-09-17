@@ -14,12 +14,19 @@ from pathlib import Path
 import cadquery as cq
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from drawing2step.pdf_diagnostic import PdfReading
 from drawing2step.revb import Requirement, resolve_context
 from drawing2step.revb_build_pipeline import build_from_audit, uncited_dimensions
 from drawing2step.revb_geometry import check_structure
-from drawing2step.revb_model import DraftSpec, build_model, enrich_ledger, thread_drill_mm
+from drawing2step.revb_model import (
+    DraftSpec,
+    build_model,
+    cavity_depth,
+    enrich_ledger,
+    thread_drill_mm,
+)
 from drawing2step.revb_pipeline import PipelineConfig, _ledger, run_audit
 
 
@@ -220,6 +227,71 @@ def test_port_uses_the_printed_flat_drill_over_the_thread_table(tmp_path):
     assert table["features"][0]["removed_volume_mm3"] > math.pi * 3**2 * 30
 
 
+def test_a_meets_cavity_port_with_no_printed_depth_reaches_the_bore(tmp_path):
+    # "DRILL TO MEET BORE/GROOVE AS SHOWN" prints a destination, not a length. Leaving depth
+    # uncited must measure the real wall thickness (OD/2-ID/2 = 30mm here), not accept some
+    # unrelated assumed figure that stops the drill short of the bore it is meant to reach.
+    result = build_model(spec([port(depth=None)]), ledger(), tmp_path)
+    receipt = result["features"][0]
+    assert receipt["status"] == "BUILT", receipt.get("detail")
+    # The independent re-verification against the exported STEP is the authoritative check;
+    # it runs after (and so overwrites, by subject) the tentative in-memory one from construction.
+    passages = {c["subject"]: c for c in result["checks"] if c["layer"] == "H2"}
+    assert passages["quench"]["status"] == "PASS", passages["quench"]
+
+
+def test_a_thru_or_blind_port_still_requires_a_cited_depth(tmp_path):
+    feature = port(depth=None, termination="thru")
+    with pytest.raises(ValidationError, match="requires a cited depth"):
+        spec([feature])
+
+
+def test_a_meets_cavity_port_ignores_an_explicit_but_insufficient_depth_citation(tmp_path):
+    # A real drawing can print a "drill depth" note next to a "TO MEET GROOVE" port that is
+    # still short of the true wall thickness (a nominal/rough figure, not a sagitta-corrected
+    # one). termination stays meets_cavity by default even when the model also cites a depth,
+    # so that citation must not override the measured one, or the drill stops short of the
+    # bore it is meant to reach.
+    result = build_model(spec([port(depth={"expr": "OD/2-ID/2-HD"})]), ledger(), tmp_path)
+    receipt = result["features"][0]
+    assert receipt["status"] == "BUILT", receipt.get("detail")
+    passages = {c["subject"]: c for c in result["checks"] if c["layer"] == "H2"}
+    assert passages["quench"]["status"] == "PASS", passages["quench"]
+
+
+def test_cavity_depth_measures_where_a_thin_drill_first_clears_a_solid():
+    box = cq.Solid.makeBox(10, 10, 10)
+    start = cq.Vector(5, 5, 5)
+    direction = cq.Vector(1, 0, 0)
+    assert cavity_depth(box, start, direction, 0.1, 10) == pytest.approx(5.0, abs=0.05)
+
+
+def test_cavity_depth_names_the_error_when_the_corridor_never_clears():
+    box = cq.Solid.makeBox(10, 10, 10)
+    start = cq.Vector(5, 5, 5)
+    direction = cq.Vector(1, 0, 0)
+    with pytest.raises(ValueError, match="No cavity found"):
+        cavity_depth(box, start, direction, 0.1, 2)
+
+
+def test_cavity_depth_accounts_for_a_wide_drill_meeting_a_curved_bore():
+    # A drill's flat end clears at its centre before its rim does against a concave (bore) wall
+    # curving away from it; the reported depth must cover the whole corridor, not just the axis.
+    tube = (
+        cq.Workplane("XZ")
+        .polyline([(20, 0), (50, 0), (50, 20), (20, 20)])
+        .close()
+        .revolve(360, (0, 0), (0, 1))
+        .val()
+    )
+    start = cq.Vector(50, 0, 10)
+    direction = cq.Vector(-1, 0, 0)
+    depth = cavity_depth(tube, start, direction, 3, 60)
+    # Centerline alone reaches the bore at exactly 30mm; a flat radius-3 drill's rim needs the
+    # extra sagitta r^2/(2R) = 3^2/(2*20) = 0.225mm to fully clear the concave bore wall.
+    assert depth == pytest.approx(30.225, abs=0.05)
+
+
 def stepped_spec(features: list[dict]) -> DraftSpec:
     # Flange Ø100 for z 0..10, hub Ø80 (PCD citation) for z 10..20, bore Ø40 throughout.
     return DraftSpec.model_validate(
@@ -320,7 +392,16 @@ def test_port_angle_may_offset_a_printed_angle_from_a_cardinal_centreline(tmp_pa
 @pytest.mark.parametrize("expression", ["OD+90", "OD/2+180", "A+45", "A*2"])
 def test_non_cardinal_or_length_constants_stay_forbidden(tmp_path, expression):
     number = "angle" if expression.startswith("A") else "depth"
-    bad = port(thread=None, entry_depth=None, entry_diameter=None, **{number: {"expr": expression}})
+    # A meets_cavity port (the port() fixture's default) never evaluates its cited depth, so a
+    # bad depth expression needs a thru/blind termination to actually reach the grammar check.
+    termination = "blind" if number == "depth" else "meets_cavity"
+    bad = port(
+        thread=None,
+        entry_depth=None,
+        entry_diameter=None,
+        termination=termination,
+        **{number: {"expr": expression}},
+    )
     result = build_model(spec([bad]), ledger(), tmp_path)
     receipt = result["features"][0]
     assert receipt["status"] == "FAILED", receipt
@@ -331,6 +412,78 @@ def test_port_entry_smaller_than_follow_on_drill_is_rejected(tmp_path):
     result = build_model(spec([port(entry_diameter={"expr": "HD/2"})]), ledger(), tmp_path)
     receipt = result["features"][0]
     assert receipt["status"] == "FAILED" and "larger" in receipt["detail"]
+
+
+def compound_port_ledger() -> list[Requirement]:
+    return [
+        requirement("OD", 100, "diameter"),
+        requirement("ID", 80, "diameter"),
+        requirement("H", 60),
+        requirement("HD", 6, "diameter"),
+        requirement("Z1", 10),
+        requirement("Z2", 40),
+        requirement("D1", 12),
+        requirement("D2", 12),
+        requirement("T1", 15, "angle", "degree"),
+        requirement("T2", 20, "angle", "degree"),
+    ]
+
+
+def compound_body_spec(features: list[dict]) -> DraftSpec:
+    return DraftSpec.model_validate(
+        {
+            "reference_face": "face_A",
+            "coordinate_policy": "Z increases from face A",
+            "profile": [
+                {"z": {"datum": "face_A"}, "radius": {"expr": "OD/2"}},
+                {"z": {"ledger": "H"}, "radius": {"expr": "OD/2"}},
+                {"z": {"ledger": "H"}, "radius": {"expr": "ID/2"}},
+                {"z": {"datum": "face_A"}, "radius": {"expr": "ID/2"}},
+            ],
+            "features": features,
+        }
+    )
+
+
+def test_a_reviewed_compound_port_spec_cuts_two_independently_angled_segments(tmp_path):
+    # 1H-139899's real port: a shallow "BOTTOM DRILL" stage and a steeper NPT thread
+    # stage, cited and angled independently, not one shared axis with a diameter change
+    # partway (that remains a plain "port").
+    feature = {
+        "id": "quench",
+        "kind": "compound_port",
+        "citations": ["HD", "H"],
+        "host": "outside",
+        "reference_face": "face_A",
+        "segments": [
+            {
+                "diameter": {"ledger": "HD"},
+                "depth": {"ledger": "D1"},
+                "z": {"ledger": "Z1"},
+                "angle": {"centreline": 90, "reason": "bottom drill shown on vertical centreline"},
+                "tilt": {"ledger": "T1"},
+                "termination": "meets_cavity",
+            },
+            {
+                "thread": ".375 NPT",
+                "depth": {"ledger": "D2"},
+                "z": {"ledger": "Z2"},
+                "angle": {"centreline": 90, "reason": "NPT thread shown on vertical centreline"},
+                "tilt": {"ledger": "T2"},
+                "termination": "meets_cavity",
+            },
+        ],
+    }
+    result = build_model(compound_body_spec([feature]), compound_port_ledger(), tmp_path)
+    receipt = result["features"][0]
+    assert receipt["status"] == "BUILT", receipt.get("detail")
+    residual = [c for c in result["checks"] if c["layer"] == "H1" and c["subject"] == "quench"]
+    assert residual and residual[0]["status"] == "PASS", residual
+    passages = {
+        c["subject"]: c for c in result["checks"] if c["layer"] == "H2" and "_seg" in c["subject"]
+    }
+    assert passages["quench_seg0"]["status"] == "PASS", passages["quench_seg0"]
+    assert passages["quench_seg1"]["status"] == "PASS", passages["quench_seg1"]
 
 
 def test_open_od_slots_cut_through_the_outside_diameter(tmp_path):
@@ -616,6 +769,102 @@ def test_reference_and_envelope_problems_trigger_a_targeted_retry_not_a_lost_bui
     assert "profile[4]: duplicates vertex profile[3]" in prompts[1]
 
 
+def test_a_dropped_inventoried_feature_triggers_correction_and_can_be_recovered(tmp_path):
+    # Draft-1 builds cleanly (no construction_failures) but never attempts a feature the
+    # independent inventory found. Coverage gaps must trigger the correction round on their
+    # own, not only geometry failures — this is the class of gap that showed up as ten dropped
+    # features on a real drawing, none of which construction_failures alone could ever surface.
+    #
+    # A minimal, fully-self-contained ledger (no N2/A survivors) so the FIRST response cites
+    # every printed dimension: this isolates the NEW coverage-gap retry in
+    # _construct_with_correction from request_proposal's own PRE-EXISTING (and differently
+    # triggered) uncited-dimension retry, which would otherwise fire first and confound it.
+    rows = [
+        requirement("OD", 100, "diameter"),
+        requirement("ID", 40, "diameter"),
+        requirement("H", 20),
+        requirement("HD", 6, "diameter"),
+        requirement("PCD", 80, "diameter"),
+        requirement("N", 8, "count", "count"),
+    ]
+    audit = {
+        "context": {"status": "PASS", "unit": "mm", "detail": "Explicit mm"},
+        "requirements": [r.model_dump(mode="json") for r in rows],
+        "inventory": {
+            "features": [
+                {
+                    "id": "bolts_plan",
+                    "type": "hole_pattern",
+                    "description": "8 bolt holes on the flange face",
+                    "same_physical_group": "bolts_plan",
+                }
+            ]
+        },
+        "drawing_number": "synthetic",
+        "original_sha256": "a" * 64,
+    }
+    raw = json.dumps(audit).encode()
+    (tmp_path / "audit.json").write_bytes(raw)
+    (tmp_path / "audit-manifest.json").write_text(
+        json.dumps({"artifacts": {"audit.json": hashlib.sha256(raw).hexdigest()}})
+    )
+    (tmp_path / "drawing.png").write_bytes(b"synthetic fixture only")
+    bolts = {
+        "id": "bolts",
+        "kind": "hole_pattern",
+        "citations": ["HD", "PCD", "N", "H"],
+        "inventory_ids": ["bolts_plan"],
+        "diameter": {"ledger": "HD"},
+        "depth": {"expr": "H/2"},
+        "pcd": {"ledger": "PCD"},
+        "count": {"ledger": "N"},
+        "angle": {"centreline": 0, "reason": "shown on the horizontal centreline"},
+        "host": "face_a",
+        "reference_face": "face_A",
+    }
+    # A decoy pattern of a different diameter on its own, non-overlapping pitch circle: it must
+    # cite the same ledger IDs (to leave nothing uncited) without sharing any hole with "bolts"
+    # — same position would be an "ineffective cut" (no new material removed) or invalidate the
+    # other's own hole-pattern check (a shared diameter make its count-and-placement check see
+    # both patterns' holes as one, since the check groups candidates by diameter alone).
+    decoy = {
+        **bolts,
+        "id": "decoy",
+        "inventory_ids": [],
+        "diameter": {"expr": "HD/2"},
+        "pcd": {"expr": "PCD-HD-HD-HD-HD"},
+    }
+    prompts = []
+
+    def provider(image, role, prompt, schema):
+        prompts.append(prompt)
+        features = [decoy, bolts] if len(prompts) > 1 else [decoy]
+        proposal = spec(features).model_dump(mode="json")
+        for key in ["schema_version", "provenance"]:
+            proposal.pop(key, None)
+        return {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": json.dumps(wire(proposal))}]},
+                }
+            ]
+        }
+
+    result = build_from_audit(tmp_path, lambda _: None, provider=provider)
+    assert len(prompts) == 2, "a coverage gap alone must still trigger the correction round"
+    assert "COVERAGE CHECK" in prompts[1]
+    assert "8 bolt holes on the flange face" in prompts[1]
+    folder = tmp_path / "models" / result["model_folder"]
+    drafts = json.loads((folder / "drafts.json").read_text())
+    assert drafts[0]["uncovered"] == ["bolts_plan"]
+    assert drafts[1]["promoted"] is True and drafts[1]["uncovered"] == []
+    built = {f["id"]: f for f in result["model_features"]}
+    assert built["bolts"]["status"] == "BUILT"
+    coverage = [c for c in result["checks"] if c["layer"] == "D" and c["subject"] == "bolts_plan"]
+    assert not coverage, "a covered group must not still be reported as a dropped feature"
+
+
 def recorded(text: str) -> dict:
     return {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": text}]}}]}
 
@@ -812,7 +1061,7 @@ def test_engineer_corrected_specs_are_built_once_without_asking_the_model(tmp_pa
     folder = tmp_path / "models" / result["model_folder"]
     assert result["model_features"][0]["status"] == "FAILED"
     assert json.loads((folder / "drafts.json").read_text()) == [
-        {"draft": "draft-1", "failed": ["bolts"], "promoted": True}
+        {"draft": "draft-1", "failed": ["bolts"], "uncovered": [], "promoted": True}
     ]
     assert not (folder / "correction-prompt.txt").exists()
 
@@ -993,6 +1242,41 @@ def test_profile_longer_than_any_printed_dimension_fails_and_is_fed_back_once(tm
     drafts = json.loads((folder / "drafts.json").read_text())
     assert drafts[0]["failed"] == ["profile"] and drafts[1]["promoted"]
     assert {c["subject"]: c["status"] for c in result["checks"]}["axial_length"] == "PASS"
+
+
+def test_build_from_audit_freezes_a_release_record_matching_the_delivered_step(tmp_path):
+    from drawing2step.final_verification import ReleaseRecord, verify_release
+
+    audit_directory(tmp_path, ledger())
+    result = build_from_audit(tmp_path, lambda _: None, corrected_spec=spec([]))
+    folder = tmp_path / "models" / result["model_folder"]
+    record = ReleaseRecord.model_validate(json.loads((folder / "release.json").read_text()))
+    checks = json.loads((folder / "checks.json").read_text())
+    verify_release(folder / result["step"], checks, record)  # must not raise
+    assert record.status in {"nominal_drawing_conformance", "unresolved_requirements", "blocked"}
+    assert not record.manufacturing_approval
+
+
+def test_a_failed_required_port_demoted_to_report_only_is_rejected_not_promoted(tmp_path):
+    # The review's own named loophole: a required feature that fails to build must not be
+    # "fixed" by declaring it report_only — that hides the obligation instead of meeting it.
+    audit_directory(tmp_path, ledger())
+    broken_port = port(entry_diameter={"expr": "HD/2"})  # entry smaller than follow-on: FAILS
+    draft1 = spec([broken_port])
+    demoted = spec([{**broken_port, "report_only": True, "reason": "operator will drill by hand"}])
+    answers = iter([proposal_json(draft1), proposal_json(demoted)])
+
+    def provider(image, role, prompt, schema):
+        return recorded(next(answers, proposal_json(spec([]))))
+
+    result = build_from_audit(tmp_path, lambda _: None, provider=provider)
+    folder = tmp_path / "models" / result["model_folder"]
+    drafts = json.loads((folder / "drafts.json").read_text())
+    assert drafts[0]["failed"] == ["quench"]
+    assert drafts[1]["promoted"] is False
+    assert "report_only" in drafts[1]["promotion_reason"]
+    receipts = {f["id"]: f for f in result["features"]}
+    assert receipts["quench"]["status"] == "FAILED"
 
 
 def test_body_length_matching_no_printed_dimension_is_a_review_item(tmp_path):
@@ -1259,6 +1543,46 @@ def test_uncovered_inventoried_port_becomes_a_named_failure_not_a_review_item(tm
     assert by_subject["marking_note"]["status"] == "UNKNOWN"
 
 
+def test_an_accepted_source_contract_rejects_a_wrong_bore_through_the_normal_pipeline(tmp_path):
+    # The ledger itself was misread (Ø80 where the drawing prints Ø40): every existing,
+    # candidate-derived check is internally consistent and passes. Only an independently
+    # authored, reviewed source contract catches this, and it must do so through the ordinary
+    # build_from_audit path — no separate manual verification script.
+    from drawing2step.source_contract import SourceContract
+
+    rows = ledger()
+    rows = [
+        r
+        if r.id != "ID"
+        else Requirement(**{**r.model_dump(), "raw_text": "Ø80", "value": Decimal(80)})
+        for r in rows
+    ]
+    audit_directory(tmp_path, rows)
+    contract = SourceContract(
+        drawing_number="synthetic",
+        requirements=(
+            {
+                "id": "bore",
+                "feature": "Main bore",
+                "quantity": "Internal diameter",
+                "kind": "axial_band",
+                "referenced_to": "face_a",
+                "unit": "mm",
+                "evidence": "reviewed by hand against the sheet",
+                "applies_between": (0, 20),
+                "bore": 40,
+                "interpretation": "reviewed",
+            },
+        ),
+    )
+    (tmp_path / "source-contract.json").write_text(contract.model_dump_json())
+    result = build_from_audit(tmp_path, lambda _: None, corrected_spec=spec([]))
+    by_subject = {c["subject"]: c for c in result["checks"] if c.get("layer") == "SRC"}
+    assert by_subject["bore"]["status"] == "FAIL"
+    assert "40" in by_subject["bore"]["detail"] and "80" in by_subject["bore"]["detail"]
+    assert result["completion"] == "PARTIAL_DRAFT_REQUIRES_REVIEW"
+
+
 def test_unit_corrected_sheets_measure_context_lengths_in_the_corrected_unit():
     from drawing2step.revb_build_pipeline import _context_length_mm
 
@@ -1288,6 +1612,24 @@ def test_unit_corrected_sheets_measure_context_lengths_in_the_corrected_unit():
         ("THEN #10-24 TAP .38 DEEP", [("linear", Decimal(".38"))]),
         # Degrees-minutes is one angle (22 + 30/60), not an angle plus a stray 30-unit length.
         ("22°30'", [("angle", Decimal("22.5"))]),
+        # A unified fractional thread is one identifier, not three lengths (5, then 16, then 18).
+        ("5/16-18 UNC", []),
+        (
+            "3X .750 3X .500 3X 5/16-18 UNC",
+            [
+                ("count", 3),
+                ("linear", Decimal(".750")),
+                ("count", 3),
+                ("linear", Decimal(".500")),
+                ("count", 3),
+            ],
+        ),
+        # An NPT pipe thread is one identifier whether written as a fraction or a decimal, not
+        # a bare 1-and-2 or a 0.500 in length.
+        ("1/2 NPT", []),
+        ("1/2-14 NPT", []),
+        (".500 NPT, THEN DRILL TO MEET GROOVE", []),
+        ("4X 1/2 NPT", [("count", 4)]),
     ],
 )
 def test_numbers_glued_to_letters_are_identifiers_not_readings(text, expected):
